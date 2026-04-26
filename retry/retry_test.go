@@ -1,0 +1,654 @@
+package retry
+
+import (
+	"bytes"
+	"context"
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// statusServer returns an httptest.Server that emits the given status codes
+// in order, looping. The hits counter is shared by all requests.
+func statusServer(t *testing.T, codes ...int) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		i := hits.Add(1) - 1
+		w.WriteHeader(codes[int(i)%len(codes)])
+		_, _ = w.Write([]byte("body"))
+	}))
+	t.Cleanup(s.Close)
+	return s, &hits
+}
+
+func mustNewTransport(t *testing.T, opts ...Option) http.RoundTripper {
+	t.Helper()
+	rt, err := NewTransport(http.DefaultTransport, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rt
+}
+
+func TestRetry_HappyPath_NoRetry(t *testing.T) {
+	s, hits := statusServer(t, 200)
+	rt := mustNewTransport(t)
+	c := &http.Client{Transport: rt}
+
+	resp, err := c.Get(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("hits=%d, want 1", got)
+	}
+}
+
+func TestRetry_5xxThen200(t *testing.T) {
+	s, hits := statusServer(t, 503, 200)
+	rt := mustNewTransport(t,
+		WithBackoff(time.Millisecond, 5*time.Millisecond),
+	)
+	c := &http.Client{Transport: rt}
+
+	resp, err := c.Get(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("hits=%d, want 2", got)
+	}
+}
+
+func TestRetry_Exhaustion(t *testing.T) {
+	s, hits := statusServer(t, 503, 503, 503)
+	rt := mustNewTransport(t,
+		WithMaxAttempts(3),
+		WithBackoff(time.Millisecond, 5*time.Millisecond),
+	)
+	c := &http.Client{Transport: rt}
+
+	resp, err := c.Get(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Fatalf("status=%d, want 503", resp.StatusCode)
+	}
+	if got := hits.Load(); got != 3 {
+		t.Fatalf("hits=%d, want 3", got)
+	}
+}
+
+func TestRetry_429Handoff(t *testing.T) {
+	s, hits := statusServer(t, 429, 200)
+	rt := mustNewTransport(t)
+	c := &http.Client{Transport: rt}
+
+	resp, err := c.Get(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 429 {
+		t.Fatalf("status=%d, want 429 (no retry)", resp.StatusCode)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("hits=%d, want 1 (429 should not be retried)", got)
+	}
+}
+
+func TestRetry_NonIdempotentNotRetried(t *testing.T) {
+	s, hits := statusServer(t, 503)
+	rt := mustNewTransport(t,
+		WithBackoff(time.Millisecond, 5*time.Millisecond),
+	)
+	c := &http.Client{Transport: rt}
+
+	resp, err := c.Post(s.URL, "text/plain", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("hits=%d, want 1 (POST is non-idempotent by default)", got)
+	}
+}
+
+func TestRetry_UserPredicateOptInForPOST(t *testing.T) {
+	s, hits := statusServer(t, 503, 200)
+	rt := mustNewTransport(t,
+		WithBackoff(time.Millisecond, 5*time.Millisecond),
+		WithRetryOn(func(req *http.Request, resp *http.Response, err error) bool {
+			if req.Method == http.MethodPost {
+				if err != nil {
+					return IsTransientNetErr(err)
+				}
+				return resp != nil && IsRetryable5xx(resp.StatusCode)
+			}
+			return false
+		}),
+	)
+	c := &http.Client{Transport: rt}
+
+	resp, err := c.Post(s.URL, "text/plain", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("hits=%d, want 2", got)
+	}
+}
+
+func TestRetry_UserPredicatePanicsRecovered(t *testing.T) {
+	s, hits := statusServer(t, 503)
+	var buf syncBuf
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	rt := mustNewTransport(t,
+		WithBackoff(time.Millisecond, 5*time.Millisecond),
+		WithLogger(logger),
+		WithRetryOn(func(*http.Request, *http.Response, error) bool {
+			panic("boom")
+		}),
+	)
+	c := &http.Client{Transport: rt}
+
+	resp, err := c.Get(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("hits=%d, want 1 (panicking predicate stops retries)", got)
+	}
+	if !strings.Contains(buf.String(), "retry_predicate_panic") {
+		t.Fatalf("expected retry_predicate_panic event in log; got: %s", buf.String())
+	}
+}
+
+func TestRetry_ContextCancelDuringSleep(t *testing.T) {
+	var hits atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(503)
+	}))
+	t.Cleanup(s.Close)
+
+	// maxDelay >= 5s so the Retry-After does NOT exceed the cap; we want to
+	// actually enter the sleep so context-cancellation can fire.
+	rt := mustNewTransport(t,
+		WithMaxAttempts(3),
+		WithBackoff(time.Millisecond, 10*time.Second),
+	)
+	c := &http.Client{Transport: rt}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", s.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	resp, err := c.Do(req)
+	elapsed := time.Since(start)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("expected ctx error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want DeadlineExceeded", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("ctx cancel should abort within ~100ms; elapsed %v", elapsed)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("hits=%d, want 1 (the second attempt should not have fired)", got)
+	}
+}
+
+func TestRetry_RetryAfterExceedsMaxAborts(t *testing.T) {
+	var hits atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(503)
+	}))
+	t.Cleanup(s.Close)
+
+	rt := mustNewTransport(t,
+		WithMaxAttempts(3),
+		WithBackoff(time.Millisecond, 50*time.Millisecond),
+	)
+
+	// Use the bare RoundTripper. http.Client logs "RoundTripper returned a
+	// response & error; ignoring response" and discards resp - which the
+	// abort-path contract specifically requires the caller to inspect+close.
+	req, err := http.NewRequest("GET", s.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := rt.RoundTrip(req)
+	if !errors.Is(err, ErrRetryAfterExceedsMax) {
+		t.Fatalf("err=%v, want ErrRetryAfterExceedsMax", err)
+	}
+	if resp == nil {
+		t.Fatal("resp should be non-nil on abort path")
+	}
+	if resp.StatusCode != 503 {
+		t.Fatalf("status=%d, want 503", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("hits=%d, want 1 (abort on first cap-collision check)", got)
+	}
+}
+
+func TestRetry_BodyNotRewindable(t *testing.T) {
+	s, _ := statusServer(t, 503, 200)
+	rt := mustNewTransport(t,
+		WithBackoff(time.Millisecond, 5*time.Millisecond),
+		WithRetryOn(func(req *http.Request, resp *http.Response, err error) bool {
+			// allow POST retries so we hit the body-rewind path
+			return resp != nil && IsRetryable5xx(resp.StatusCode)
+		}),
+	)
+	c := &http.Client{Transport: rt}
+
+	// http.NewRequest with a *bytes.Reader sets GetBody. Stripping it
+	// simulates a caller that built a body-bearing request without GetBody.
+	req, err := http.NewRequest("POST", s.URL, bytes.NewReader([]byte("payload")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.GetBody = nil
+
+	resp, err := c.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if !errors.Is(err, ErrBodyNotRewindable) {
+		t.Fatalf("err=%v, want ErrBodyNotRewindable in chain", err)
+	}
+}
+
+func TestRetry_GetBodyErrorPropagates(t *testing.T) {
+	s, _ := statusServer(t, 503, 200)
+	rt := mustNewTransport(t,
+		WithBackoff(time.Millisecond, 5*time.Millisecond),
+		WithRetryOn(func(req *http.Request, resp *http.Response, err error) bool {
+			return resp != nil && IsRetryable5xx(resp.StatusCode)
+		}),
+	)
+	c := &http.Client{Transport: rt}
+
+	getBodyErr := errors.New("synthetic GetBody failure")
+	req, err := http.NewRequest("POST", s.URL, bytes.NewReader([]byte("payload")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fail on the first GetBody call (which only happens on the first
+	// retry attempt; the original Body covers attempt 0).
+	req.GetBody = func() (io.ReadCloser, error) { return nil, getBodyErr }
+
+	resp, err := c.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if !errors.Is(err, getBodyErr) {
+		t.Fatalf("err=%v, want chain containing %v", err, getBodyErr)
+	}
+}
+
+func TestRetry_BackoffValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		min  time.Duration
+		max  time.Duration
+	}{
+		{"both-zero", 0, 0},
+		{"min-zero-max-positive", 0, 5 * time.Second},
+		{"swapped", 2 * time.Second, 200 * time.Millisecond},
+		{"negative-min", -1, time.Second},
+		{"min-below-floor", 100 * time.Microsecond, time.Second},
+		{"max-above-ceiling", time.Second, 2 * time.Hour},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, err := NewTransport(http.DefaultTransport, WithBackoff(tc.min, tc.max))
+			if !errors.Is(err, ErrInvalidBackoff) {
+				t.Fatalf("err=%v want ErrInvalidBackoff", err)
+			}
+			if rt != nil {
+				t.Fatalf("transport=%v, want nil", rt)
+			}
+		})
+	}
+}
+
+func TestRetry_MaxAttemptsValidation(t *testing.T) {
+	cases := []int{0, -1, 101, 1_000_000}
+	for _, n := range cases {
+		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
+			rt, err := NewTransport(http.DefaultTransport, WithMaxAttempts(n))
+			if !errors.Is(err, ErrInvalidMaxAttempts) {
+				t.Fatalf("err=%v want ErrInvalidMaxAttempts", err)
+			}
+			if rt != nil {
+				t.Fatalf("transport=%v, want nil", rt)
+			}
+		})
+	}
+}
+
+func TestRetry_NilBaseUsesDefault(t *testing.T) {
+	rt, err := NewTransport(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt == nil {
+		t.Fatal("transport is nil")
+	}
+}
+
+func TestRetry_MaxAttempts1DisablesRetries(t *testing.T) {
+	s, hits := statusServer(t, 503)
+	rt := mustNewTransport(t, WithMaxAttempts(1))
+	c := &http.Client{Transport: rt}
+	resp, err := c.Get(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("hits=%d, want 1", got)
+	}
+}
+
+// drainProbeBody tracks whether Close was called and whether at least one
+// Read happened (proxy for "drained").
+type drainProbeBody struct {
+	r         io.Reader
+	closed    atomic.Bool
+	readBytes atomic.Int64
+}
+
+func (b *drainProbeBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	b.readBytes.Add(int64(n))
+	return n, err
+}
+func (b *drainProbeBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+// drainProbeTransport returns 503 with a body that records drain, then 200.
+type drainProbeTransport struct {
+	first *drainProbeBody
+	hits  atomic.Int32
+}
+
+func (t *drainProbeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	hit := t.hits.Add(1)
+	if hit == 1 {
+		return &http.Response{
+			StatusCode: 503,
+			Body:       t.first,
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader("ok")),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+func TestRetry_DrainsPriorBody(t *testing.T) {
+	bigPayload := strings.NewReader(strings.Repeat("x", 8<<10)) // 8 KiB
+	probe := &drainProbeBody{r: bigPayload}
+	inner := &drainProbeTransport{first: probe}
+
+	rt, err := NewTransport(inner,
+		WithBackoff(time.Millisecond, 5*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest("GET", "http://example/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if !probe.closed.Load() {
+		t.Fatal("prior response body was not closed before retry")
+	}
+	if probe.readBytes.Load() == 0 {
+		t.Fatal("prior response body was not drained before retry")
+	}
+}
+
+func TestRetry_TypeOfChainWalking(t *testing.T) {
+	netErr := &errStruct{name: "neterr"}
+	wrapped := fmt.Errorf("wrap: %w", netErr)
+	joined := errors.Join(netErr, errors.New("plain"))
+	joinedWrap := errors.Join(wrapped, errors.New("plain"))
+
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil", nil, ""},
+		{"plain", netErr, "*retry.errStruct"},
+		{"wrapped", wrapped, "*fmt.wrapError/*retry.errStruct"},
+		{"joined", joined, "*retry.errStruct|*errors.errorString"},
+		{"joined-wrap", joinedWrap, "*fmt.wrapError/*retry.errStruct|*errors.errorString"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := typeOf(tc.err)
+			if got != tc.want {
+				t.Fatalf("typeOf=%q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRetry_TypeOfDepthCap(t *testing.T) {
+	// Build a 7-deep linear wrap chain: depth-cap should fire.
+	err := error(&errStruct{name: "leaf"})
+	for i := 0; i < 7; i++ {
+		err = fmt.Errorf("layer%d: %w", i, err)
+	}
+	got := typeOf(err)
+	if !strings.Contains(got, "...") {
+		t.Fatalf("expected truncation marker; got %q", got)
+	}
+}
+
+func TestRetry_ParseRetryAfter(t *testing.T) {
+	// Cases store the header value (or nilResp) so the *http.Response is
+	// constructed inside the loop body. bodyclose can't track responses
+	// through table literals; constructing in-loop sidesteps that.
+	cases := []struct {
+		name    string
+		header  string // Retry-After value; ignored when nilResp is true
+		nilResp bool
+		want    time.Duration
+	}{
+		{name: "nil-resp", nilResp: true, want: 0},
+		{name: "missing", header: "", want: 0},
+		{name: "delta-positive", header: "5", want: 5 * time.Second},
+		{name: "delta-zero", header: "0", want: time.Nanosecond},
+		{name: "delta-negative", header: "-3", want: 0},
+		{name: "garbage", header: "not a date", want: 0},
+		{name: "http-date-past", header: "Mon, 02 Jan 2006 15:04:05 GMT", want: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var resp *http.Response
+			if !tc.nilResp {
+				resp = &http.Response{Header: make(http.Header), Body: http.NoBody}
+				if tc.header != "" {
+					resp.Header.Set("Retry-After", tc.header)
+				}
+				defer func() { _ = resp.Body.Close() }()
+			}
+			got := parseRetryAfter(resp)
+			if got != tc.want {
+				t.Fatalf("parseRetryAfter=%v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRetry_LoggerEmitsExhausted(t *testing.T) {
+	s, _ := statusServer(t, 503, 503)
+	var buf syncBuf
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	rt := mustNewTransport(t,
+		WithMaxAttempts(2),
+		WithBackoff(time.Millisecond, 5*time.Millisecond),
+		WithLogger(logger),
+	)
+	c := &http.Client{Transport: rt}
+	resp, err := c.Get(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	out := buf.String()
+	if !strings.Contains(out, "retry_exhausted") {
+		t.Fatalf("expected retry_exhausted event; got: %s", out)
+	}
+	if !strings.Contains(out, "last_status=503") {
+		t.Fatalf("expected last_status=503; got: %s", out)
+	}
+}
+
+// syncBuf is a goroutine-safe bytes.Buffer for capturing slog output.
+type syncBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// errStruct is a typed error so test assertions can name the type.
+type errStruct struct{ name string }
+
+func (e *errStruct) Error() string { return e.name }
+
+// TestRetry_SilentByDefault_NoSlogDefaultOutput verifies that without an
+// explicit WithLogger, retry emits zero records into slog.Default. We swap
+// slog.Default for a buffer-backed handler that accepts every level
+// (including Debug), drive the transport through every event branch we can
+// reach (sleep, decision-retry, decision-stop, exhausted), then assert the
+// buffer is empty.
+func TestRetry_SilentByDefault_NoSlogDefaultOutput(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var buf syncBuf
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	s, _ := statusServer(t, 503, 503, 200)
+	rt := mustNewTransport(t,
+		WithMaxAttempts(3),
+		WithBackoff(time.Millisecond, 5*time.Millisecond),
+		// No WithLogger; this is the contract under test.
+	)
+	c := &http.Client{Transport: rt}
+	resp, err := c.Get(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	if got := buf.String(); got != "" {
+		t.Fatalf("retry emitted to slog.Default without WithLogger; got: %q", got)
+	}
+}
+
+func TestRetry_IsTransientNetErr_PermanentExclusions(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"io.EOF", io.EOF, true},
+		{"io.ErrUnexpectedEOF", io.ErrUnexpectedEOF, true},
+		{"context.DeadlineExceeded", context.DeadlineExceeded, true},
+		{"net.OpError generic", &net.OpError{Op: "read", Err: errors.New("transient")}, true},
+		{"DNS NXDOMAIN (IsNotFound)", &net.DNSError{Name: "nope.invalid", IsNotFound: true}, false},
+		{"DNS server failure (not NotFound)", &net.DNSError{Name: "x", IsTemporary: true}, true},
+		{"syscall.ECONNREFUSED bare", syscall.ECONNREFUSED, false},
+		{"ECONNREFUSED wrapped in OpError", &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}, false},
+		{"x509.UnknownAuthorityError", x509.UnknownAuthorityError{}, false},
+		{"x509.HostnameError", &x509.HostnameError{Host: "example.com"}, false},
+		{"x509.CertificateInvalidError", x509.CertificateInvalidError{Reason: x509.Expired}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsTransientNetErr(tc.err)
+			if got != tc.want {
+				t.Fatalf("IsTransientNetErr(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}

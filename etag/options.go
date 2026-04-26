@@ -1,6 +1,9 @@
 package etag
 
-import "log/slog"
+import (
+	"cmp"
+	"log/slog"
+)
 
 // Option configures a Transport. The interface form (rather than a bare
 // `func(*config)`) lets us evolve the API without a breaking change: new
@@ -43,9 +46,9 @@ func newConfig(opts []Option) *config {
 	for _, o := range opts {
 		o.apply(c)
 	}
-	if c.logger == nil {
-		c.logger = slog.Default()
-	}
+	// Silent by default: a nil logger becomes a discard logger so call sites
+	// can write unconditionally without nil-checks.
+	c.logger = cmp.Or(c.logger, slog.New(slog.DiscardHandler))
 	return c
 }
 
@@ -98,13 +101,10 @@ func WithMaxCacheBytes(n int64) Option {
 }
 
 // WithLogger supplies the slog.Logger the transport emits events to.
-// Default: slog.Default().
+// Pass nil (or omit the option) to silence the package; a nil logger is
+// replaced with slog.New(slog.DiscardHandler) at construction.
 func WithLogger(l *slog.Logger) Option {
-	return optionFunc(func(cfg *config) {
-		if l != nil {
-			cfg.logger = l
-		}
-	})
+	return optionFunc(func(cfg *config) { cfg.logger = l })
 }
 
 // WithDriftDetected registers a callback fired on each drift state

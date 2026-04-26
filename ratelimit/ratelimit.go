@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"cmp"
 	"log/slog"
 	"net/http"
 	"time"
@@ -65,14 +66,11 @@ func WithTotalSleepLimit(d time.Duration) Option {
 	})
 }
 
-// WithLogger supplies the slog.Logger for default event logging. Default:
-// slog.Default().
+// WithLogger supplies the slog.Logger for default event logging. Pass nil
+// (or omit the option) to silence the default callbacks; a nil logger is
+// replaced with slog.New(slog.DiscardHandler) at construction.
 func WithLogger(l *slog.Logger) Option {
-	return optionFunc(func(c *config) {
-		if l != nil {
-			c.logger = l
-		}
-	})
+	return optionFunc(func(c *config) { c.logger = l })
 }
 
 // WithUpstreamOptions appends raw upstream options from
@@ -100,9 +98,7 @@ func NewTransport(base http.RoundTripper, opts ...Option) http.RoundTripper {
 	for _, o := range opts {
 		o.apply(cfg)
 	}
-	if cfg.logger == nil {
-		cfg.logger = slog.Default()
-	}
+	cfg.logger = cmp.Or(cfg.logger, slog.New(slog.DiscardHandler))
 
 	primaryDetected := cfg.primaryDetected
 	if primaryDetected == nil {

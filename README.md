@@ -51,7 +51,7 @@ func main() {
 
 `ghkit.New` is generic over the returned type; passing `github.NewClient` lets type inference pick up `*github.Client`. ghkit itself has zero dependency on `go-github`. It isn't in `go.mod`, isn't imported, and won't end up in your compiled binary unless you pull it in yourself. Pass whichever go-github major (or any other `func(*http.Client) T` factory) you want.
 
-For runnable starter programs, see [`examples/`](examples/): `static-pat`, `installation-token`, `backfill`, and `github-enterprise` are each a complete `main()` you can copy-paste.
+For runnable starter programs, see [`examples/`](examples/): `static-pat`, `installation-token`, `backfill`, `github-enterprise`, and `retry-on-flaky` are each a complete `main()` you can copy-paste.
 
 ## How?
 
@@ -59,13 +59,14 @@ For runnable starter programs, see [`examples/`](examples/): `static-pat`, `inst
 http.Client
  Throttle              (x/time/rate proactive)       [WithRequestsPerSecond]
   RateLimit            (go-github-ratelimit v2)      [default ON]
-   oauth2.Transport    (clones req, sets Auth)       [WithToken/WithTokenSource]
-    ETag               (hashes auth'd clone)         [WithETagCache]
-     Base              (*http.Transport,
+   Retry               (5xx + transient net errors)  [WithRetry]
+    oauth2.Transport   (clones req, sets Auth)       [WithToken/WithTokenSource]
+     ETag              (hashes auth'd clone)         [WithETagCache]
+      Base             (*http.Transport,
                         DisableCompression=true)     [WithBaseTransport]
 ```
 
-Each layer is optional. The stack is opt-in: `ghkit.HTTPClient(...)` only includes the layers you asked for. The order is load-bearing, though. ETag sits below the oauth2 layer so it hashes the request with the current Authorization header. Rate limiting sits above so it sees every outgoing call including ETag-triggered conditional GETs. The proactive throttle sits outermost so it caps issued RPS regardless of cache replays.
+Each layer is optional. The stack is opt-in: `ghkit.HTTPClient(...)` only includes the layers you asked for. The order is load-bearing, though. ETag sits below the oauth2 layer so it hashes the request with the current Authorization header. Rate limiting sits above so it sees every outgoing call including ETag-triggered conditional GETs. Retry sits below RateLimit so 429s are deferred to the rate-limit layer; sits above oauth2 so retried requests get the latest token via oauth2's per-call `Source.Token()`. The proactive throttle sits outermost so it caps issued RPS regardless of cache replays.
 
 The rate-limit layer's named options (`WithPrimaryLimitDetected`, `WithSecondaryLimitDetected`, `WithTotalSleepLimit`, `WithLogger`) cover the common callbacks. For upstream features ghkit does not curate, `ratelimit.WithUpstreamOptions(opts ...any)` forwards raw options to `gofri/go-github-ratelimit/v2`.
 
@@ -184,6 +185,44 @@ gh, err := ghkit.New(func(hc *http.Client) *github.Client {
 </details>
 
 <details>
+<summary><b>Retry on transient failures (5xx, network errors)</b></summary>
+
+```go
+gh, err := ghkit.New(github.NewClient,
+    ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
+    ghkit.WithRetry(), // 3 attempts, 200ms..2s decorrelated jitter, idempotent methods only
+)
+```
+
+Tuned policy with POST opt-in via `Idempotency-Key`:
+
+```go
+import "github.com/pcanilho/go-github-kit/retry"
+
+gh, err := ghkit.New(github.NewClient,
+    ghkit.WithToken(token),
+    ghkit.WithRetry(
+        retry.WithMaxAttempts(5),
+        retry.WithBackoff(500*time.Millisecond, 10*time.Second),
+        retry.WithRetryOn(func(req *http.Request, resp *http.Response, err error) bool {
+            // Retry POST/PATCH when the caller asserted idempotency.
+            if req.Header.Get("Idempotency-Key") != "" {
+                if err != nil { return retry.IsTransientNetErr(err) }
+                return resp != nil && retry.IsRetryable5xx(resp.StatusCode)
+            }
+            // Otherwise the default behaviour.
+            if !retry.IsIdempotent(req.Method) { return false }
+            if err != nil { return retry.IsTransientNetErr(err) }
+            return resp != nil && retry.IsRetryable5xx(resp.StatusCode)
+        }),
+    ),
+)
+```
+
+429 is hard-excluded regardless of the predicate so `ratelimit` (the layer above) owns it. `Retry-After` is honored when present; if it exceeds `maxDelay` the call returns `(resp, retry.ErrRetryAfterExceedsMax)` and the caller owns drain+close on `resp`.
+</details>
+
+<details>
 <summary><b>Use only the etag sub-package in a hand-built stack</b></summary>
 
 ```go
@@ -239,6 +278,8 @@ The kit ships `etag.NewLRUCache(size)` as the only built-in (in-process, memory-
 Gzip has to be disabled on the underlying transport, otherwise the hash domain diverges from what GitHub signed. The default base is a clone of `http.DefaultTransport` with `DisableCompression=true`; if you pass your own base via `WithBaseTransport` and it isn't an `*http.Transport`, construction fails with an explicit error rather than silently miscomputing every hash.
 
 `etag.WithKeyScope` is required the moment you share a cache across identities, static PAT or JIT alike. Two callers hitting the same URL under different auth without a scope would race their bodies into the same key, and the library refuses to guess which one wins. Use the installation ID, a per-app scope, or any opaque string.
+
+Each retry attempt is a real HTTP call from the throttle layer's perspective. `WithRetry(retry.WithMaxAttempts(5))` combined with `WithRequestsPerSecond(2, 1)` means a worst-case failing request can briefly use 5x your nominal RPS budget. Size accordingly or leave `maxAttempts` at the default (3).
 
 ## Using a different go-github version
 

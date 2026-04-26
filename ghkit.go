@@ -1,6 +1,7 @@
 package ghkit
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/pcanilho/go-github-kit/etag"
 	"github.com/pcanilho/go-github-kit/ratelimit"
+	"github.com/pcanilho/go-github-kit/retry"
 	"github.com/pcanilho/go-github-kit/throttle"
 	"golang.org/x/oauth2"
 )
@@ -16,6 +18,7 @@ import (
 // distinguish specific failure modes in tests or runtime handling.
 var (
 	ErrConflictingAuth       = errors.New("ghkit: WithToken and WithTokenSource are mutually exclusive")
+	ErrConflictingRateLimit  = errors.New("ghkit: WithRateLimit and WithRateLimitDisabled are mutually exclusive")
 	ErrPreAuthedBaseWithAuth = errors.New("ghkit: WithBaseTransport with a non-*http.Transport base cannot be combined with WithToken or WithTokenSource")
 	ErrNonPositiveRPS        = errors.New("ghkit: WithRequestsPerSecond requires rps > 0 and burst >= 1")
 	ErrNilFactory            = errors.New("ghkit: New requires a non-nil factory function")
@@ -32,9 +35,11 @@ func HTTPClient(opts ...Option) (*http.Client, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
-	if cfg.logger == nil {
-		cfg.logger = slog.Default()
-	}
+	// Silent by default: no logger means no log output. Sub-packages also
+	// receive this (possibly discarding) logger, but per-sub-package
+	// WithLogger options can still override since user opts apply after
+	// our defaulted one (see prepend pattern below).
+	cfg.logger = cmp.Or(cfg.logger, slog.New(slog.DiscardHandler))
 
 	// Build inside-out: base -> etag -> oauth2 -> ratelimit -> throttle -> userAgent.
 	// ETag must sit below oauth2 so its hash domain sees the cloned
@@ -43,8 +48,7 @@ func HTTPClient(opts ...Option) (*http.Client, error) {
 	rt := cfg.baseTransport
 
 	if cfg.etagEnabled {
-		etagOpts := cfg.etagOpts
-		etagOpts = append(etagOpts, etag.WithLogger(cfg.logger))
+		etagOpts := append([]etag.Option{etag.WithLogger(cfg.logger)}, cfg.etagOpts...)
 		inner, err := etag.NewTransport(rt, etagOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("ghkit: etag: %w", err)
@@ -62,12 +66,18 @@ func HTTPClient(opts ...Option) (*http.Client, error) {
 		rt = http.DefaultTransport
 	}
 
+	if cfg.retryEnabled {
+		retryOpts := append([]retry.Option{retry.WithLogger(cfg.logger)}, cfg.retryOpts...)
+		inner, err := retry.NewTransport(rt, retryOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("ghkit: retry: %w", err)
+		}
+		rt = inner
+	}
+
 	if cfg.rateLimitEnabled {
-		rlOpts := cfg.rateLimitOpts
-		rlOpts = append(rlOpts, ratelimit.WithLogger(cfg.logger))
+		rlOpts := append([]ratelimit.Option{ratelimit.WithLogger(cfg.logger)}, cfg.rateLimitOpts...)
 		rt = ratelimit.NewTransport(rt, rlOpts...)
-	} else if len(cfg.rateLimitOpts) > 0 {
-		cfg.logger.Warn("ghkit: WithRateLimit callbacks were registered but WithRateLimitDisabled was also set; callbacks will be ignored")
 	}
 
 	if cfg.throttleRPS > 0 {
@@ -148,6 +158,12 @@ func New[T any](factory func(*http.Client) T, opts ...Option) (T, error) {
 func validateConfig(c *config) error {
 	if c.token != "" && c.tokenSource != nil {
 		return ErrConflictingAuth
+	}
+
+	// WithRateLimit and WithRateLimitDisabled together is a contradiction:
+	// the user registered callbacks while explicitly turning the layer off.
+	if c.rateLimitDisabledByUser && len(c.rateLimitOpts) > 0 {
+		return ErrConflictingRateLimit
 	}
 
 	// Wrap with the concrete base type so the error tells the caller what

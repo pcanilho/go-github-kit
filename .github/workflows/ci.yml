@@ -114,7 +114,7 @@ jobs:
         run: go vet ./...
 
   live-drift:
-    name: Live ETag drift probe
+    name: Live drift and retry probe
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: test
@@ -130,7 +130,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: go test -tags=live
+      - name: go test -tags=live (etag + retry)
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: go test -tags=live -run TestETag_Live ./etag/...
+        run: go test -tags=live -run 'TestETag_Live|TestRetry_Live' ./etag/... ./retry/...

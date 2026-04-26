@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -103,19 +102,13 @@ func TestGHKit_ErrorOnSharedCacheWithoutKeyScope(t *testing.T) {
 	}
 }
 
-func TestGHKit_WarnsOnRateLimitDisabledWithCallbacks(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+func TestGHKit_RateLimitDisabledWithCallbacksReturnsError(t *testing.T) {
 	_, err := ghkit.HTTPClient(
 		ghkit.WithRateLimit(ratelimit.WithPrimaryLimitDetected(func(*ratelimit.PrimaryEvent) {})),
 		ghkit.WithRateLimitDisabled(),
-		ghkit.WithLogger(logger),
 	)
-	if err != nil {
-		t.Fatalf("disabled+callbacks should warn, not error; got %v", err)
-	}
-	if !strings.Contains(buf.String(), "callbacks will be ignored") {
-		t.Fatalf("expected warn log; got %q", buf.String())
+	if !errors.Is(err, ghkit.ErrConflictingRateLimit) {
+		t.Fatalf("want ErrConflictingRateLimit; got %v", err)
 	}
 }
 

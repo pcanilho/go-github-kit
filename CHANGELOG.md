@@ -5,6 +5,115 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-04-26
+
+Adds a `retry` middleware for transient failures (5xx, network errors,
+transport-level deadline exceeded), filling the gap between the rate-limit
+layer (which owns 429s) and the underlying transport. Composes with the
+existing stack without new runtime dependencies.
+
+### Added
+
+#### Retry middleware (`retry/`)
+
+- New `retry.NewTransport(base, opts...)` chainable `http.RoundTripper`.
+  Defaults: 3 attempts (1 initial + 2 retries), 200ms..2s decorrelated jitter
+  (per AWS guidance), idempotent methods only (GET/HEAD/OPTIONS/PUT/DELETE),
+  default predicate retries {500, 502, 503, 504} or `*net.OpError`/`io.EOF`/
+  `io.ErrUnexpectedEOF`/`context.DeadlineExceeded`.
+- Options: `WithMaxAttempts(n)` (clamped to [1, 100]), `WithBackoff(min, max)`
+  (clamped to [1ms, 1h] with min<=max), `WithRetryOn(predicate)` (replaces
+  the default predicate; takes ownership of method-safety),
+  `WithLogger(*slog.Logger)`.
+- Top-level `ghkit.WithRetry(opts ...retry.Option)` slots the layer between
+  RateLimit and oauth2 in the chain - 429s never reach retry, and retried
+  requests get the latest token via oauth2's per-call `Source.Token()`.
+- 429 hard-exclusion lives outside the predicate so a user-supplied
+  `WithRetryOn` cannot accidentally fight `ratelimit`.
+- `Retry-After` honored (delta-seconds and HTTP-date formats); when it
+  exceeds the operator's `maxDelay` the call returns
+  `(prior_resp, retry.ErrRetryAfterExceedsMax)` and the caller owns
+  drain+close on the response.
+- Caller-context cancellation is terminal: `req.Context().Err() != nil`
+  always stops retries before any predicate is consulted, and during
+  backoff sleep via `time.NewTimer` + `Stop` (no leaked timers on long
+  `Retry-After` values).
+- Body-bearing retries require `req.GetBody`; missing GetBody on a retry
+  attempt yields `errors.Join(retry.ErrBodyNotRewindable, prior_err)` so
+  callers see both causes.
+- Exported predicate primitives - `retry.IsIdempotent(method)`,
+  `retry.IsRetryable5xx(code)`, `retry.IsTransientNetErr(err)` - so callers
+  composing their own `WithRetryOn` don't have to reimplement the defaults.
+- Panic recovery around user predicates: a panicking `WithRetryOn` is
+  treated as "do not retry" and emits a `retry_predicate_panic` event
+  rather than crashing the transport.
+- Sanitised structured logging via `slog.Logger` with explicit per-event
+  levels: `retry_sleep`, `retry_decision` (Debug; silent-success first
+  attempts skipped), `retry_abort`, `retry_body_unrewindable`,
+  `retry_exhausted`, `retry_predicate_panic` (Warn). `last_err_type` walks
+  joined/wrapped error chains so operators see meaningful types instead of
+  `*errors.joinError`.
+- DoS protection: prior-response drain capped at 128 KiB before close,
+  bounding the time we hold a connection on hostile/oversize bodies.
+
+#### Documentation
+
+- README transport-stack diagram updated to show retry between RateLimit
+  and oauth2.
+- New retry recipe with default and tuned-policy examples (including
+  `Idempotency-Key`-based POST opt-in).
+- New "Things worth knowing" note on retry/throttle interaction (each retry
+  attempt consumes a throttle token).
+- Package `doc.go` for `retry/` and updated top-level `doc.go` with the new
+  chain layout.
+
+#### Tooling and CI
+
+- Live integration test (`retry/live_check_test.go`, build-tag `live`,
+  function `TestRetry_Live`) that exercises retry against `api.github.com`.
+- CI `live-drift` job renamed to `Live drift and retry probe` and extended
+  to run both `TestETag_Live` and `TestRetry_Live`.
+
+### Changed
+
+- **Silent by default.** `ghkit`, `etag`, `ratelimit`, and `retry` no longer
+  default-initialise a `slog.Default()` logger. Without an explicit
+  `WithLogger(...)` call, the library emits no log records. This is a
+  behaviour change from 1.0.0; users who relied on default stderr output
+  must now opt in via `ghkit.WithLogger(slog.Default())` (or any logger).
+- Per-sub-package `WithLogger` options inside `WithRetry`, `WithETagCache`,
+  and `WithRateLimit` now correctly override the top-level `WithLogger`
+  instead of being silently shadowed by it. Previously the chain assembly
+  appended ghkit's logger after user-supplied sub-package options, so
+  user values lost; the prepend pattern lets user values win.
+- `etag.WithLogger(nil)` and `ratelimit.WithLogger(nil)` now mean
+  "explicitly silent" instead of being a no-op. Combined with silent-by-
+  default, this lets callers compose `WithLogger(real)` then
+  `WithLogger(nil)` to silence on a per-construction basis.
+- `retry.IsTransientNetErr` now short-circuits known-permanent failures to
+  `false`: DNS NXDOMAIN (`*net.DNSError.IsNotFound`), `syscall.ECONNREFUSED`
+  (TCP RST on connect to a closed port), and x509 cert-validation errors
+  (`x509.UnknownAuthorityError`, `*x509.HostnameError`,
+  `x509.CertificateInvalidError`). Misconfigured URLs and expired certs now
+  fail fast instead of burning the retry budget. Other DNS errors (server
+  failure, timeout) remain transient.
+- `ghkit.WithRateLimit` and `ghkit.WithRateLimitDisabled` are now mutually
+  exclusive. Combining them returns `ErrConflictingRateLimit` at
+  construction. Previously the kit logged a warning and silently dropped
+  the registered callbacks; with silent-by-default that warning would have
+  been invisible. The hard error matches the existing
+  `ErrConflictingAuth` precedent for `WithToken` + `WithTokenSource`.
+
+### Added (continued)
+
+- New runnable example at `examples/retry-on-flaky/` demonstrating
+  `WithRetry` with a tuned backoff and a custom predicate that opts POST in
+  via `Idempotency-Key`.
+
+### Dependencies
+
+No changes. Same as 1.0.0.
+
 ## [1.0.0] - 2026-04-25
 
 Initial public release.
@@ -132,4 +241,5 @@ and rotating PATs alike.
 - `golang.org/x/oauth2` v0.36.0
 - `golang.org/x/time` v0.15.0
 
+[1.1.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.1.0
 [1.0.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.0.0

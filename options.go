@@ -7,6 +7,7 @@ import (
 
 	"github.com/pcanilho/go-github-kit/etag"
 	"github.com/pcanilho/go-github-kit/ratelimit"
+	"github.com/pcanilho/go-github-kit/retry"
 	"golang.org/x/oauth2"
 )
 
@@ -35,8 +36,13 @@ type config struct {
 	etagOpts    []etag.Option
 
 	// Reactive rate limiter (go-github-ratelimit).
-	rateLimitEnabled bool // set to false by WithRateLimitDisabled
-	rateLimitOpts    []ratelimit.Option
+	rateLimitEnabled        bool // set to false by WithRateLimitDisabled
+	rateLimitDisabledByUser bool // distinguishes "disabled" from "default-on never set"
+	rateLimitOpts           []ratelimit.Option
+
+	// Retry middleware (5xx + transient net errors).
+	retryEnabled bool
+	retryOpts    []retry.Option
 
 	// Proactive throttle (x/time/rate).
 	throttleRPS   float64
@@ -106,9 +112,34 @@ func WithRateLimit(opts ...ratelimit.Option) Option {
 	})
 }
 
-// WithRateLimitDisabled turns off the reactive rate limiter.
+// WithRateLimitDisabled turns off the reactive rate limiter. Mutually
+// exclusive with WithRateLimit; combining the two surfaces
+// ErrConflictingRateLimit at construction.
 func WithRateLimitDisabled() Option {
-	return optionFunc(func(c *config) { c.rateLimitEnabled = false })
+	return optionFunc(func(c *config) {
+		c.rateLimitEnabled = false
+		c.rateLimitDisabledByUser = true
+	})
+}
+
+// WithRetry enables the retry middleware. Sub-options (retry.WithMaxAttempts,
+// retry.WithBackoff, retry.WithRetryOn, retry.WithLogger) configure the
+// policy. The default predicate retries idempotent methods on 5xx and
+// recognised transient network errors; 429 is hard-excluded so the rate
+// limiter above owns it.
+//
+// Retry sits between RateLimit and oauth2 in the chain: 429s never reach
+// retry, and retried requests get the latest token via oauth2's per-call
+// Source.Token().
+//
+// Each retry attempt consumes a throttle token if WithRequestsPerSecond is
+// in use. A worst-case failing request can briefly use maxAttempts times
+// the nominal RPS budget.
+func WithRetry(opts ...retry.Option) Option {
+	return optionFunc(func(c *config) {
+		c.retryEnabled = true
+		c.retryOpts = append(c.retryOpts, opts...)
+	})
 }
 
 // WithRequestsPerSecond enables the proactive token-bucket throttle.
@@ -120,8 +151,13 @@ func WithRequestsPerSecond(rps float64, burst int) Option {
 	})
 }
 
-// WithLogger supplies the slog.Logger used for diagnostic events. Default:
-// slog.Default(). Forwarded to etag and ratelimit sub-packages.
+// WithLogger supplies the slog.Logger used for diagnostic events.
+//
+// The library is silent by default: omit this option (or pass nil) and no
+// log records are emitted. When set, the supplied logger is forwarded to
+// etag, ratelimit, and retry sub-packages as their default; per-sub-package
+// WithLogger options inside WithRetry/WithETagCache/WithRateLimit can still
+// override.
 func WithLogger(l *slog.Logger) Option {
 	return optionFunc(func(c *config) { c.logger = l })
 }
