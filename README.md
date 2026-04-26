@@ -238,6 +238,13 @@ gh := github.NewClient(hc)
 ```
 </details>
 
+## Testing your code
+
+The `ghtest` sub-package provides two helpers for the GitHub-specific
+traps in writing tests: secondary-rate-limit classification and the
+bored-engineer ETag hash domain. See [`TESTING.md`](TESTING.md) for the
+full recipe set.
+
 ## Migrating from an in-tree GitHub transport
 
 If your repo already has a hand-rolled `oauth2.Transport` + `go-github-ratelimit` + custom ETag transport stack, [`MIGRATION.md`](MIGRATION.md) maps the most common shapes (Kubernetes operator, multi-installation webhook processor, backfill job) to ghkit's options API with concrete before/after snippets and notes on behavioral differences worth checking before the swap.

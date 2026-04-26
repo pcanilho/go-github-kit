@@ -5,6 +5,51 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-04-26
+
+Adds a `ghtest` sub-package with two helpers that hide the non-discoverable
+GitHub-specific traps in testing ghkit-using code: secondary-rate-limit
+classification (the `documentation_url` suffix `gofri/go-github-ratelimit`
+pattern-matches on) and the bored-engineer ETag hash domain (which includes
+the request `Authorization` header). Plus a `TESTING.md` with self-contained
+recipes for the surrounding stdlib bits. No new runtime dependencies.
+
+### Added
+
+#### `ghtest` sub-package
+
+- `ghtest.WriteSecondaryLimit(w, retryAfter)` writes a 403 with `Retry-After`
+  (whole seconds; negative durations clamp to zero) and a JSON body whose
+  `documentation_url` ends in `#secondary-rate-limits`. That suffix is what
+  `gofri/go-github-ratelimit` pattern-matches on to classify the response as
+  an `AbuseRateLimitError`, so consumer retry paths actually trigger in
+  tests instead of silently falling through.
+- `ghtest.Write304IfMatch(w, r, body) bool` computes the expected ETag using
+  the bored-engineer algorithm (hashes Authorization, Accept, and Cookie
+  request headers along with the body), normalises every tag in
+  `If-None-Match` (split on commas, trim whitespace, strip `W/` weak prefix
+  and surrounding quotes), and on any match sets a quoted RFC 7232 `ETag`
+  response header, writes 304 Not Modified with empty body, and returns
+  true. Returns false and writes nothing on miss.
+- Both helpers compose with stdlib `httptest.NewServer`; consumers bring
+  their own handler. Tests cover quoted/unquoted/weak-only matches, multi-tag
+  comma splitting, no-match leaves response untouched, no-header
+  short-circuit, and different-body misses.
+
+#### Documentation
+
+- New `TESTING.md` with self-contained recipes: routing a ghkit-built client
+  at a test server (the `gh.BaseURL = url.Parse(srv.URL+"/")` pattern),
+  ETag 304 replay handling, rate-limit header emission (no helper, recipe
+  only), Link-header pagination (no helper, recipe only), secondary-rate-
+  limit testing, plus a "See also" pointer to `migueleliasweb/go-github-mock`
+  for the SDK-layer mocking case.
+- README "Testing your code" section, three lines linking to `TESTING.md`.
+
+### Dependencies
+
+No changes. Same as 1.1.0.
+
 ## [1.1.0] - 2026-04-26
 
 Adds a `retry` middleware for transient failures (5xx, network errors,
@@ -241,5 +286,6 @@ and rotating PATs alike.
 - `golang.org/x/oauth2` v0.36.0
 - `golang.org/x/time` v0.15.0
 
+[1.2.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.2.0
 [1.1.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.1.0
 [1.0.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.0.0
