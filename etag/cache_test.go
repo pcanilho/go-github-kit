@@ -61,7 +61,7 @@ func mustGet(t *testing.T, c Cache, key string) (Entry, bool) {
 }
 
 func TestETag_Cache_LRUEvictionByCount(t *testing.T) {
-	c := NewLRUCache(2)
+	c := NewLRUCache(2).(*lruCache)
 	mustAdd(t, c, "a", Entry{Body: []byte("1")})
 	mustAdd(t, c, "b", Entry{Body: []byte("2")})
 	mustAdd(t, c, "c", Entry{Body: []byte("3")})
@@ -73,6 +73,46 @@ func TestETag_Cache_LRUEvictionByCount(t *testing.T) {
 	}
 	if _, ok := mustGet(t, c, "c"); !ok {
 		t.Fatal("c should still be present")
+	}
+	c.mu.Lock()
+	got := c.byteTotal
+	c.mu.Unlock()
+	if want := int64(len("2") + len("3")); got != want {
+		t.Fatalf("byteTotal = %d, want %d (drift after count-cap eviction)", got, want)
+	}
+}
+
+func TestETag_Cache_ByteTotalAfterExplicitRemove(t *testing.T) {
+	c := NewLRUCache(1024).(*lruCache)
+	mustAdd(t, c, "k", Entry{Body: make([]byte, 100)})
+	c.mu.Lock()
+	pre := c.byteTotal
+	c.mu.Unlock()
+	if pre != 100 {
+		t.Fatalf("byteTotal after Add = %d, want 100", pre)
+	}
+	if err := c.Remove(t.Context(), "k"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	c.mu.Lock()
+	got := c.byteTotal
+	c.mu.Unlock()
+	if got != 0 {
+		t.Fatalf("byteTotal after Remove = %d, want 0 (callback should decrement once, not twice)", got)
+	}
+}
+
+func TestETag_Cache_ByteBudgetByteTotalAccurate(t *testing.T) {
+	c := NewLRUCache(1024).(*lruCache)
+	c.setByteCap(500)
+	mustAdd(t, c, "a", Entry{Body: make([]byte, 200)})
+	mustAdd(t, c, "b", Entry{Body: make([]byte, 200)})
+	mustAdd(t, c, "c", Entry{Body: make([]byte, 200)})
+	c.mu.Lock()
+	got := c.byteTotal
+	c.mu.Unlock()
+	if got != 400 {
+		t.Fatalf("byteTotal = %d, want 400 (b=200 + c=200)", got)
 	}
 }
 

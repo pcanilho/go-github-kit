@@ -18,11 +18,17 @@ import (
 )
 
 var (
-	ErrInvalidMaxAttempts   = errors.New("retry: maxAttempts must be in [1, 100]")
-	ErrInvalidBackoff       = errors.New("retry: backoff requires 1ms <= minDelay <= maxDelay <= 1h")
-	ErrBodyNotRewindable    = errors.New("retry: cannot retry request with non-nil Body and nil GetBody")
-	ErrRetryAfterExceedsMax = errors.New("retry: server Retry-After exceeds operator max delay")
+	ErrInvalidMaxAttempts = errors.New("retry: maxAttempts must be in [1, 100]")
+	ErrInvalidBackoff     = errors.New("retry: backoff requires 1ms <= minDelay <= maxDelay <= 1h")
+	ErrBodyNotRewindable  = errors.New("retry: cannot retry request with non-nil Body and nil GetBody")
 )
+
+// ErrRetryAfterExceedsMax is returned when a server's Retry-After header
+// exceeds the operator-configured maxDelay. When this error is returned,
+// resp is nil; the transport drains and closes the prior response before
+// returning, satisfying the http.RoundTripper invariant that a non-nil
+// error implies the caller has nothing to close.
+var ErrRetryAfterExceedsMax = errors.New("retry: server Retry-After exceeds operator max delay")
 
 const (
 	defaultMaxAttempts = 3
@@ -224,11 +230,15 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			raOverride := parseRetryAfter(resp)
 
 			if raOverride > t.maxDelay {
+				if resp != nil {
+					_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
+					_ = resp.Body.Close()
+				}
 				t.logEvent(ctx, slog.LevelWarn, "retry_abort",
 					"reason", "retry_after_exceeds_max",
 					"retry_after_ms", raOverride.Milliseconds(),
 					"max_delay_ms", t.maxDelay.Milliseconds())
-				return resp, ErrRetryAfterExceedsMax
+				return nil, ErrRetryAfterExceedsMax
 			}
 
 			computed := t.computeJitter(prevSleep)

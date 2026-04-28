@@ -79,6 +79,9 @@ func WithLogger(l *slog.Logger) Option {
 // (the secondary abort callback, custom limit providers, before-request
 // hooks). Applied after ghkit's named options, so they can override
 // callbacks ghkit installed by default.
+//
+// Type-mismatched values are silently dropped by the upstream constructor;
+// verify the upstream package's option types when forwarding.
 func WithUpstreamOptions(opts ...any) Option {
 	return optionFunc(func(c *config) { c.upstream = append(c.upstream, opts...) })
 }

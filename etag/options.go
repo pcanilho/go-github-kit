@@ -71,6 +71,9 @@ func WithCache(c Cache) Option {
 // SHA256 into the cache key, so two callers sharing a Cache with different
 // scopes never collide. Scopes are treated as opaque: do NOT embed secrets
 // in the scope value.
+//
+// An empty scope is treated identically to omitting the option; if WithCache
+// is also present, NewTransport fails with ErrKeyScopeRequired.
 func WithKeyScope(scope string) Option {
 	return optionFunc(func(cfg *config) { cfg.keyScope = scope })
 }

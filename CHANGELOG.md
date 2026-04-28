@@ -5,6 +5,53 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-04-28
+
+Three bug fixes in transport behaviour and a small set of godoc clarifications.
+No API surface changes, no new dependencies.
+
+### Fixed
+
+- `retry.Transport`: when `Retry-After` exceeds the configured `maxDelay`,
+  the prior 5xx response is now drained and closed inside the transport and
+  the call returns `(nil, ErrRetryAfterExceedsMax)`. Previously the
+  transport returned `(resp, err)` with `resp.Body` open, which violated
+  the `http.RoundTripper` contract that a non-nil error implies the caller
+  has nothing to close. When wrapped by `http.Client` (the standard
+  `ghkit.New` path), the response was dropped unclosed, leaking the body
+  and preventing connection reuse on every aborted retry.
+- `etag.Transport` drift recovery: the post-cooldown probe predicate
+  shifted from `n%driftProbeEveryN == 0` to `n%driftProbeEveryN == 1`.
+  Probes now fire on calls 1, 51, 101 after `driftCooldown` elapses (was
+  50, 100, 150), shifting the probe burst to the start of the post-cooldown
+  window and cutting recovery latency from 150 to 101 cacheable requests.
+- `etag.NewLRUCache`: `byteTotal` accounting now decrements on count-cap
+  evictions via a registered eviction callback. Previously, when the LRU's
+  internal slot cap (default 4096) overflowed and the eldest entry was
+  evicted, `byteTotal` was not adjusted; on workloads with more than 4096
+  distinct cached entries combined with `WithMaxCacheBytes`, the
+  over-counted total made the byte-budget loop evict real entries to
+  compensate for phantom bytes, shrinking effective cache capacity.
+
+### Documentation
+
+- `retry.ErrRetryAfterExceedsMax` godoc records the new contract: on this
+  error `resp` is `nil` and the transport has already drained and closed
+  the prior response.
+- `etag.WithKeyScope` godoc clarifies that an empty scope is treated
+  identically to omitting the option, and that combining `WithCache` with
+  no scope fails construction with `ErrKeyScopeRequired`.
+- `ratelimit.WithUpstreamOptions` godoc warns that type-mismatched values
+  are silently dropped by the upstream constructor.
+- `etag` package doc records the drift detector's tuning assumption: a
+  transport handling fewer than roughly 100 cacheable requests after the
+  cooldown window elapses will not complete recovery under the current
+  private thresholds.
+- `ghkit.HTTPClient` composition-order comment now lists the `retry` layer
+  between `oauth2` and `ratelimit`, matching the actual code.
+- README retry recipe updated to match the new abort contract and to note
+  that POST/PATCH retries with a body require `req.GetBody`.
+
 ## [1.2.0] - 2026-04-26
 
 Adds a `ghtest` sub-package with two helpers that hide the non-discoverable
@@ -286,6 +333,7 @@ and rotating PATs alike.
 - `golang.org/x/oauth2` v0.36.0
 - `golang.org/x/time` v0.15.0
 
+[1.2.1]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.2.1
 [1.2.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.2.0
 [1.1.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.1.0
 [1.0.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.0.0

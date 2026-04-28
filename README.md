@@ -219,7 +219,9 @@ gh, err := ghkit.New(github.NewClient,
 )
 ```
 
-429 is hard-excluded regardless of the predicate so `ratelimit` (the layer above) owns it. `Retry-After` is honored when present; if it exceeds `maxDelay` the call returns `(resp, retry.ErrRetryAfterExceedsMax)` and the caller owns drain+close on `resp`.
+POST/PATCH retries with a body require `req.GetBody`; `http.NewRequest` only sets it for `*bytes.Buffer`, `*bytes.Reader`, and `*strings.Reader`. For other readers, set it manually so the retry layer can rewind on attempt 2+.
+
+429 is hard-excluded regardless of the predicate so `ratelimit` (the layer above) owns it. `Retry-After` is honored when present; if it exceeds `maxDelay` the call returns `(nil, retry.ErrRetryAfterExceedsMax)` and the transport has already drained and closed the prior response.
 </details>
 
 <details>

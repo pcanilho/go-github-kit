@@ -336,7 +336,7 @@ func (t *Transport) buildIfNoneMatch(reqHeaders http.Header, entry Entry) (strin
 	if t.driftDegraded.Load() {
 		degradedAt := time.Unix(0, t.driftDegradedAt.Load())
 		if time.Since(degradedAt) >= driftCooldown {
-			if n := t.driftProbeCounter.Add(1); n%int64(driftProbeEveryN) == 0 {
+			if n := t.driftProbeCounter.Add(1); n%int64(driftProbeEveryN) == 1 {
 				return `"` + ComputeExpectedETag(reqHeaders, ParseVary(entry.Headers), entry.Body) + `"`, true
 			}
 		}

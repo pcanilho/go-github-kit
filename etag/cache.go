@@ -46,13 +46,22 @@ var nowFn = time.Now
 // TTL-based eviction. size <= 0 uses 4096. The returned Cache is safe for
 // concurrent use and spawns no background goroutines: hashicorp/golang-lru/v2
 // starts a reaper only when ttl > 0; we pass 0 to turn that off.
+//
+// The eviction callback fires on count-cap eviction and explicit Remove,
+// not on same-key overwrite (upstream MoveToFront). It runs synchronously
+// in the calling goroutine while c.mu is held and must not re-lock.
 func NewLRUCache(size int) Cache {
 	if size <= 0 {
 		size = defaultLRUSize
 	}
-	return &lruCache{
-		lru: expirable.NewLRU[string, Entry](size, nil, 0),
-	}
+	c := &lruCache{}
+	c.lru = expirable.NewLRU[string, Entry](size, func(_ string, e Entry) {
+		c.byteTotal -= int64(len(e.Body))
+		if c.byteTotal < 0 {
+			c.byteTotal = 0
+		}
+	}, 0)
+	return c
 }
 
 type lruCache struct {
@@ -86,20 +95,15 @@ func (c *lruCache) Add(_ context.Context, key string, e Entry) error {
 		}
 	}
 
-	// If a byte budget is configured, evict oldest entries until the new
-	// entry fits or the LRU is empty.
+	// c.lru.Remove fires the eviction callback which decrements byteTotal.
 	if c.byteCap > 0 {
 		for c.byteTotal+entrySize > c.byteCap {
-			k, victim, ok := c.lru.GetOldest()
+			k, _, ok := c.lru.GetOldest()
 			if !ok {
 				break
 			}
 			if !c.lru.Remove(k) {
 				break
-			}
-			c.byteTotal -= int64(len(victim.Body))
-			if c.byteTotal < 0 {
-				c.byteTotal = 0
 			}
 		}
 	}
@@ -112,13 +116,6 @@ func (c *lruCache) Add(_ context.Context, key string, e Entry) error {
 func (c *lruCache) Remove(_ context.Context, key string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if old, ok := c.lru.Peek(key); ok {
-		c.byteTotal -= int64(len(old.Body))
-		if c.byteTotal < 0 {
-			c.byteTotal = 0
-		}
-	}
 	c.lru.Remove(key)
 	return nil
 }

@@ -41,7 +41,7 @@ func HTTPClient(opts ...Option) (*http.Client, error) {
 	// our defaulted one (see prepend pattern below).
 	cfg.logger = cmp.Or(cfg.logger, slog.New(slog.DiscardHandler))
 
-	// Build inside-out: base -> etag -> oauth2 -> ratelimit -> throttle -> userAgent.
+	// Build inside-out: base -> etag -> oauth2 -> retry -> ratelimit -> throttle -> userAgent.
 	// ETag must sit below oauth2 so its hash domain sees the cloned
 	// Authorization header. UserAgent sits outermost so it overrides any
 	// SDK-level value.

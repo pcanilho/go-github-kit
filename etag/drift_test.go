@@ -291,9 +291,8 @@ func TestDrift_ProbeInduced304CountsTowardRecovery(t *testing.T) {
 	tr.driftDegraded.Store(true)
 	tr.driftDegradedAt.Store(time.Now().Add(-2 * driftCooldown).UnixNano())
 
-	// Drive enough requests to land driftRecoverAfterN probes (each is 1 in
-	// driftProbeEveryN). Allow generous headroom.
-	for range driftProbeEveryN*driftRecoverAfterN + driftProbeEveryN {
+	// Pins the n%50==1 probe-burst-at-start invariant: probes at iter 1, 51, 101.
+	for range driftProbeEveryN*(driftRecoverAfterN-1) + 1 {
 		_ = doGet(t, c, s.URL+"/repos/a/b").StatusCode
 		if !tr.Stats().Degraded {
 			break // recovered

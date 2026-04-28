@@ -22,6 +22,15 @@
 //   - NewTransport: an http.RoundTripper that does the hit/miss/304/write-
 //     invalidation dance around any Cache implementation.
 //
+// Drift-detector tuning. The detector is calibrated for steady GitHub-App
+// traffic. Internal thresholds (how often the transport probes after the
+// cooldown elapses, and how many consecutive successful probes are needed
+// to recover) are private and may change. With the current values, a
+// transport handling fewer than roughly 100 cacheable requests after the
+// cooldown window elapses will not complete recovery to precompute mode.
+// This is a deliberate trade-off against probe-induced load on high-traffic
+// deployments.
+//
 // Security invariant: no log line emitted from this package may include
 // req.Header or resp.Header as a structured field. The Authorization header
 // value is a live credential. Only specific scalar fields (lengths, status

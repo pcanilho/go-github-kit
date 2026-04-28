@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -254,26 +255,77 @@ func TestRetry_RetryAfterExceedsMaxAborts(t *testing.T) {
 		WithBackoff(time.Millisecond, 50*time.Millisecond),
 	)
 
-	// Use the bare RoundTripper. http.Client logs "RoundTripper returned a
-	// response & error; ignoring response" and discards resp - which the
-	// abort-path contract specifically requires the caller to inspect+close.
 	req, err := http.NewRequest("GET", s.URL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := rt.RoundTrip(req)
+	resp, err := rt.RoundTrip(req) //nolint:bodyclose // resp is nil on abort path
 	if !errors.Is(err, ErrRetryAfterExceedsMax) {
 		t.Fatalf("err=%v, want ErrRetryAfterExceedsMax", err)
 	}
-	if resp == nil {
-		t.Fatal("resp should be non-nil on abort path")
+	if resp != nil {
+		t.Fatalf("resp must be nil on abort path; got %+v", resp)
 	}
-	if resp.StatusCode != 503 {
-		t.Fatalf("status=%d, want 503", resp.StatusCode)
-	}
-	_ = resp.Body.Close()
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("hits=%d, want 1 (abort on first cap-collision check)", got)
+	}
+}
+
+// TestRetry_RetryAfterExceedsMax_ConnReuse pins the no-leak invariant: when
+// the abort path drains and closes resp.Body, the conn returns to the idle
+// pool and the follow-up GET reuses it.
+func TestRetry_RetryAfterExceedsMax_ConnReuse(t *testing.T) {
+	var hits atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := hits.Add(1)
+		if n == 1 {
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, "retry-after server-busy")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	}))
+	t.Cleanup(s.Close)
+
+	rt := mustNewTransport(t,
+		WithMaxAttempts(3),
+		WithBackoff(time.Millisecond, 50*time.Millisecond),
+	)
+	client := &http.Client{Transport: rt}
+
+	resp1, err := client.Get(s.URL) //nolint:bodyclose // resp is nil on abort path
+	if !errors.Is(err, ErrRetryAfterExceedsMax) {
+		t.Fatalf("err=%v, want ErrRetryAfterExceedsMax", err)
+	}
+	if resp1 != nil {
+		t.Fatalf("resp must be nil on abort path; got %+v", resp1)
+	}
+
+	var reused bool
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused },
+	}
+	req2, err := http.NewRequestWithContext(
+		httptrace.WithClientTrace(context.Background(), trace),
+		http.MethodGet, s.URL, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("follow-up: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp2.Body)
+	_ = resp2.Body.Close()
+
+	if !reused {
+		t.Fatal("expected connection reuse; abort path leaked the conn")
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("hits=%d, want 2", got)
 	}
 }
 
