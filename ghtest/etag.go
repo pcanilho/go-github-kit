@@ -21,7 +21,7 @@ func Write304IfMatch(w http.ResponseWriter, r *http.Request, body []byte) bool {
 		return false
 	}
 	expNorm := etag.NormaliseETag(expected)
-	for _, tok := range strings.Split(inm, ",") {
+	for tok := range strings.SplitSeq(inm, ",") {
 		if etag.NormaliseETag(strings.TrimSpace(tok)) == expNorm {
 			w.Header().Set("ETag", `"`+expected+`"`)
 			w.WriteHeader(http.StatusNotModified)

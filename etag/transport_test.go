@@ -430,9 +430,7 @@ func TestETag_ConcurrentAccessSafe(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 20 {
 				r, err := c.Get(s.URL + "/users/octocat")
 				if err != nil {
@@ -442,7 +440,7 @@ func TestETag_ConcurrentAccessSafe(t *testing.T) {
 				_, _ = io.ReadAll(r.Body)
 				_ = r.Body.Close()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -619,9 +617,7 @@ func TestETag_ConcurrentColdMissDedup(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			r, err := c.Get(s.URL + "/users/concurrent")
 			if err != nil {
@@ -629,7 +625,7 @@ func TestETag_ConcurrentColdMissDedup(t *testing.T) {
 				return
 			}
 			_ = r.Body.Close()
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -792,5 +788,132 @@ func TestETag_LogHygiene_DriftEvents(t *testing.T) {
 		if strings.Contains(out, b) {
 			t.Errorf("drift event log contained banned field %q:\n%s", b, out)
 		}
+	}
+}
+
+type tenantKey struct{}
+
+func TestETag_AutoKeyScope_MultiTenantIsolation(t *testing.T) {
+	bodyA := []byte(`{"tenant":"A"}`)
+	bodyB := []byte(`{"tenant":"B"}`)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := bodyA
+		if strings.Contains(r.Header.Get("Authorization"), "B") {
+			body = bodyB
+		}
+		expected := ComputeExpectedETag(r.Header, nil, body)
+		if NormaliseETag(r.Header.Get("If-None-Match")) == expected {
+			w.Header().Set("ETag", `"`+expected+`"`)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"`+expected+`"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer s.Close()
+
+	shared := NewLRUCache(16)
+	rt, err := NewTransport(nil,
+		WithCache(shared),
+		WithAutoKeyScope(func(req *http.Request) (string, error) {
+			tenant, _ := req.Context().Value(tenantKey{}).(string)
+			return tenant, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &http.Client{Transport: rt}
+
+	do := func(tenant, tok string) []byte {
+		req, _ := http.NewRequest("GET", s.URL+"/users/octocat", nil)
+		req = req.WithContext(context.WithValue(req.Context(), tenantKey{}, tenant))
+		req.Header.Set("Authorization", "token "+tok)
+		r, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = r.Body.Close() }()
+		b, _ := io.ReadAll(r.Body)
+		return b
+	}
+
+	if !bytes.Equal(do("A", "A-token"), bodyA) {
+		t.Fatal("tenant A first call should get A's body")
+	}
+	if !bytes.Equal(do("B", "B-token"), bodyB) {
+		t.Fatal("tenant B first call should get B's body")
+	}
+	if !bytes.Equal(do("A", "A-token"), bodyA) {
+		t.Fatal("tenant A second call: cross-tenant aliasing under one Transport")
+	}
+	if !bytes.Equal(do("B", "B-token"), bodyB) {
+		t.Fatal("tenant B second call: cross-tenant aliasing under one Transport")
+	}
+}
+
+func TestETag_AutoKeyScope_ConflictsWithKeyScope(t *testing.T) {
+	_, err := NewTransport(nil,
+		WithKeyScope("static"),
+		WithAutoKeyScope(func(*http.Request) (string, error) { return "dyn", nil }),
+	)
+	if !errors.Is(err, ErrConflictingScope) {
+		t.Fatalf("want ErrConflictingScope; got %v", err)
+	}
+}
+
+func TestETag_AutoKeyScope_SatisfiesSharedCacheRequirement(t *testing.T) {
+	_, err := NewTransport(nil,
+		WithCache(NewLRUCache(4)),
+		WithAutoKeyScope(func(*http.Request) (string, error) { return "x", nil }),
+	)
+	if err != nil {
+		t.Fatalf("WithAutoKeyScope should satisfy the shared-cache scope requirement; got %v", err)
+	}
+}
+
+func TestETag_AutoKeyScope_EmptyScopeIsError(t *testing.T) {
+	body := []byte(`{}`)
+	s, _ := ghServer(t, body)
+
+	rt, err := NewTransport(nil,
+		WithAutoKeyScope(func(*http.Request) (string, error) { return "", nil }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &http.Client{Transport: rt}
+
+	resp, err := c.Get(s.URL + "/users/octocat")
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("want error from c.Get; got nil")
+	}
+	if !errors.Is(err, ErrEmptyScope) {
+		t.Fatalf("want wrapped ErrEmptyScope; got %v", err)
+	}
+}
+
+func TestETag_AutoKeyScope_ErrorPropagates(t *testing.T) {
+	body := []byte(`{}`)
+	s, _ := ghServer(t, body)
+
+	sentinel := errors.New("no tenant in context")
+	rt, err := NewTransport(nil,
+		WithAutoKeyScope(func(*http.Request) (string, error) { return "", sentinel }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &http.Client{Transport: rt}
+
+	resp, err := c.Get(s.URL + "/users/octocat")
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("want error from c.Get; got nil")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("want wrapped sentinel; got %v", err)
 	}
 }

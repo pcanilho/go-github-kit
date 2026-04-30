@@ -2,8 +2,10 @@
 // failures, and a proactive token bucket behind a single options-pattern
 // API. New is generic over the returned client type, so ghkit has no
 // compile-time dependency on any specific GitHub SDK; pass any
-// func(*http.Client) T factory at the call site (canonically
-// github.com/google/go-github's NewClient).
+// func(*http.Client) T factory at the call site:
+// github.com/google/go-github's NewClient for REST,
+// github.com/shurcooL/githubv4's NewClient for GraphQL, or any other
+// client constructor that takes an *http.Client.
 //
 // Transport stack (outer -> inner, each layer optional):
 //
@@ -49,4 +51,19 @@
 //
 // Sub-packages (etag, ratelimit, throttle) are independently importable
 // for callers composing their own stack.
+//
+// # GraphQL / v4 compatibility
+//
+// HTTPClient returns an *http.Client usable with any GraphQL v4 library
+// (e.g. github.com/shurcooL/githubv4). The etag layer no-ops on POST, so
+// v4 traffic flows through oauth2 + retry + ratelimit + throttle + UA
+// without ETag caching. Use WithETagCache only when you also issue REST
+// GETs through the same client.
+//
+// # Custom cache backends
+//
+// The etag.Cache interface (Get/Add/Remove) is the seam for Redis,
+// DynamoDB, or any other store. Implement the three methods and pass
+// the result via etag.WithCache; ghkit never holds a binary dependency
+// on a backend.
 package ghkit

@@ -31,7 +31,7 @@ func FuzzETag_ComputeExpectedETag(f *testing.F) {
 		}
 		var vary []string
 		if varyCSV != "" {
-			for _, p := range strings.Split(varyCSV, ",") {
+			for p := range strings.SplitSeq(varyCSV, ",") {
 				p = strings.TrimSpace(p)
 				if p != "" {
 					vary = append(vary, p)

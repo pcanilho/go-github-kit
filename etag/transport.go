@@ -59,6 +59,16 @@ var (
 	// ErrNilCache is returned when WithCache is called with a nil Cache. If
 	// you want the default LRU, omit WithCache entirely.
 	ErrNilCache = errors.New("etag: WithCache was called with nil; omit the option to use the default LRU")
+
+	// ErrConflictingScope is returned when WithKeyScope and WithAutoKeyScope
+	// are both set on the same Transport. Pick one.
+	ErrConflictingScope = errors.New("etag: WithKeyScope and WithAutoKeyScope are mutually exclusive")
+
+	// ErrEmptyScope is returned (wrapped) from RoundTrip when a
+	// WithAutoKeyScope fn returns an empty string with a nil error. The
+	// scope is contractually non-empty; the caller's fn must either
+	// return a non-empty scope or a non-nil error.
+	ErrEmptyScope = errors.New("etag: WithAutoKeyScope fn returned an empty scope with a nil error")
 )
 
 // Transport is an http.RoundTripper that adds If-None-Match on cacheable
@@ -80,7 +90,8 @@ var (
 type Transport struct {
 	base        http.RoundTripper
 	cache       Cache
-	scopeDigest string // hex(sha256(keyScope)), precomputed once
+	scopeDigest string                              // hex(sha256(keyScope)); empty when scopeFn is set
+	scopeFn     func(*http.Request) (string, error) // nil when WithKeyScope is used
 	maxBody     int
 	logger      *slog.Logger
 
@@ -118,7 +129,10 @@ func NewTransport(base http.RoundTripper, opts ...Option) (http.RoundTripper, er
 	if cfg.callerCache && cfg.cache == nil {
 		return nil, ErrNilCache
 	}
-	if cfg.callerCache && cfg.keyScope == "" {
+	if cfg.keyScope != "" && cfg.scopeFn != nil {
+		return nil, ErrConflictingScope
+	}
+	if cfg.callerCache && cfg.keyScope == "" && cfg.scopeFn == nil {
 		return nil, ErrKeyScopeRequired
 	}
 	if _, ok := base.(*Transport); ok {
@@ -140,13 +154,17 @@ func NewTransport(base http.RoundTripper, opts ...Option) (http.RoundTripper, er
 
 	// Hash so caller-supplied keyScope cannot inject the cache-key
 	// delimiter and alias another tenant's entries.
-	sum := sha256.Sum256([]byte(cfg.keyScope))
-	scopeDigest := hex.EncodeToString(sum[:])
+	var scopeDigest string
+	if cfg.scopeFn == nil {
+		sum := sha256.Sum256([]byte(cfg.keyScope))
+		scopeDigest = hex.EncodeToString(sum[:])
+	}
 
 	return &Transport{
 		base:             resolvedBase,
 		cache:            cache,
 		scopeDigest:      scopeDigest,
+		scopeFn:          cfg.scopeFn,
 		maxBody:          cfg.maxBodyBytes,
 		logger:           cfg.logger,
 		driftWindowStart: time.Now(),
@@ -182,7 +200,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	ctx := req.Context()
-	key := cacheKey(req.URL, t.scopeDigest)
+	digest, err := t.resolveScope(req)
+	if err != nil {
+		return nil, fmt.Errorf("etag: scopeFn: %w", err)
+	}
+	key := cacheKey(req.URL, digest)
 	entry, haveEntry, getErr := t.cache.Get(ctx, key)
 	if getErr != nil {
 		// Backend-side error (e.g. Redis network blip). Treat as a miss
@@ -416,6 +438,25 @@ func cacheKey(u *url.URL, scopeDigest string) string {
 	return stripped.String() + "|" + scopeDigest
 }
 
+// resolveScope returns the per-request scope digest. With WithKeyScope it
+// returns the precomputed digest. With WithAutoKeyScope it invokes the
+// caller's fn and hashes the result; an empty scope with a nil error is
+// a contract violation surfaced as ErrEmptyScope.
+func (t *Transport) resolveScope(req *http.Request) (string, error) {
+	if t.scopeFn == nil {
+		return t.scopeDigest, nil
+	}
+	scope, err := t.scopeFn(req)
+	if err != nil {
+		return "", err
+	}
+	if scope == "" {
+		return "", ErrEmptyScope
+	}
+	sum := sha256.Sum256([]byte(scope))
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // readBounded reads up to maxBody+1 bytes. Returns (body, false, nil) on
 // fit (resp.Body reassigned to a bytes.Reader); (_, true, nil) on
 // oversize (resp.Body wrapped in oversizeBody). Initial allocation uses
@@ -430,10 +471,7 @@ func readBounded(resp *http.Response, maxBody int) ([]byte, bool, error) {
 	}
 	initialAlloc := int64(bodyBufferFloor)
 	if hint := resp.ContentLength; hint > 0 && hint <= int64(maxBody) {
-		initialAlloc = hint + 1
-		if initialAlloc < bodyBufferFloor {
-			initialAlloc = bodyBufferFloor
-		}
+		initialAlloc = max(hint+1, bodyBufferFloor)
 	}
 	buf := bytes.NewBuffer(make([]byte, 0, initialAlloc))
 	_, err := io.CopyN(buf, resp.Body, int64(maxBody)+1)

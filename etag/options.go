@@ -3,6 +3,7 @@ package etag
 import (
 	"cmp"
 	"log/slog"
+	"net/http"
 )
 
 // Option configures a Transport. The interface form (rather than a bare
@@ -19,6 +20,7 @@ type config struct {
 	cache         Cache
 	callerCache   bool // true if cache was supplied via WithCache (vs. default)
 	keyScope      string
+	scopeFn       func(*http.Request) (string, error)
 	maxBodyBytes  int
 	maxCacheCap   int64
 	logger        *slog.Logger
@@ -76,6 +78,19 @@ func WithCache(c Cache) Option {
 // is also present, NewTransport fails with ErrKeyScopeRequired.
 func WithKeyScope(scope string) Option {
 	return optionFunc(func(cfg *config) { cfg.keyScope = scope })
+}
+
+// WithAutoKeyScope derives the cache-key scope per request via fn(req).
+// Use it when one *http.Client serves multiple tenants. Mutually
+// exclusive with WithKeyScope: combining both yields ErrConflictingScope.
+// Either option satisfies the caller-supplied-Cache scope requirement.
+//
+// fn must be safe for concurrent use and must return either a non-empty
+// scope string with a nil error, or an empty string with a non-nil
+// error. Both are wrapped and returned from RoundTrip; an empty scope
+// with a nil error surfaces as ErrEmptyScope.
+func WithAutoKeyScope(fn func(*http.Request) (string, error)) Option {
+	return optionFunc(func(cfg *config) { cfg.scopeFn = fn })
 }
 
 // WithMaxBodyBytes caps the per-entry body size the transport will buffer

@@ -13,10 +13,7 @@ import (
 // to classify the error as an AbuseRateLimitError, so the consumer's retry
 // path actually triggers in tests. Negative durations are clamped to zero.
 func WriteSecondaryLimit(w http.ResponseWriter, retryAfter time.Duration) {
-	secs := int(retryAfter.Round(time.Second).Seconds())
-	if secs < 0 {
-		secs = 0
-	}
+	secs := max(int(retryAfter.Round(time.Second).Seconds()), 0)
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)

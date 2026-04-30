@@ -147,6 +147,8 @@ What moves: `etag.NewWithCache(...)` becomes `etag.WithCache(...) + etag.WithKey
 
 If your `tokenManager` already returns a cached token with a TTL, prefer mint-on-demand (`oauth2.StaticTokenSource` rebuilt per call) so the JIT layer stays in your code. If you'd rather have ghkit pull tokens directly, hand it an `oauth2.ReuseTokenSource` that wraps your factory; either pattern is supported.
 
+To collapse this further into a single shared transport across all installations, swap `etag.WithKeyScope(...)` for `etag.WithAutoKeyScope(fn)` and let `fn` resolve the installation id from `req.Context()`. See the README's "Multi-tenant single client" recipe and `examples/installation-token/` for the canonical `ghinstallation.Transport` to `oauth2.TokenSource` bridge.
+
 ## Recipe 3: Backfill / batch job with proactive RPS cap
 
 Shape: a one-off CLI that walks GitHub APIs at a deliberately low rate (1.3 req/s) on top of the reactive limiter, with a static PAT.

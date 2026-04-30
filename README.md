@@ -1,6 +1,6 @@
 # `ghkit`
 
-A small Go toolkit that wraps [`github.com/google/go-github`](https://github.com/google/go-github) with ETag caching, reactive rate limiting, and a client-side token bucket. Opt into what you need; compose the rest yourself.
+A small Go toolkit that wraps [`github.com/google/go-github`](https://github.com/google/go-github) (REST), [`github.com/shurcooL/githubv4`](https://github.com/shurcooL/githubv4) (GraphQL), or any `func(*http.Client) T` client factory with ETag caching, reactive rate limiting, and a client-side token bucket. Opt into what you need; compose the rest yourself.
 
 [![CI](https://github.com/pcanilho/go-github-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/pcanilho/go-github-kit/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/pcanilho/go-github-kit.svg)](https://pkg.go.dev/github.com/pcanilho/go-github-kit)
@@ -51,7 +51,7 @@ func main() {
 
 `ghkit.New` is generic over the returned type; passing `github.NewClient` lets type inference pick up `*github.Client`. ghkit itself has zero dependency on `go-github`. It isn't in `go.mod`, isn't imported, and won't end up in your compiled binary unless you pull it in yourself. Pass whichever go-github major (or any other `func(*http.Client) T` factory) you want.
 
-For runnable starter programs, see [`examples/`](examples/): `static-pat`, `installation-token`, `backfill`, `github-enterprise`, and `retry-on-flaky` are each a complete `main()` you can copy-paste.
+For runnable starter programs, see [`examples/`](examples/): `static-pat`, `installation-token`, `graphql-v4`, `backfill`, `github-enterprise`, and `retry-on-flaky` are each a complete `main()` you can copy-paste.
 
 ## How?
 
@@ -73,6 +73,22 @@ The rate-limit layer's named options (`WithPrimaryLimitDetected`, `WithSecondary
 ## Recipes
 
 <details open>
+<summary><b>Recommended setup for a long-lived service</b></summary>
+
+```go
+gh, err := ghkit.New(github.NewClient,
+    ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
+    ghkit.WithETagCache(),
+    ghkit.WithRetry(),
+    ghkit.WithUserAgent("my-app/1.0"),
+    ghkit.WithTimeout(30*time.Second),
+)
+```
+
+Defaults are tuned for steady-state operators: rate-limit on, retry 3 attempts with decorrelated jitter on idempotent 5xx + transient net errors, etag at 4096 entries / 256 MiB. Tune downward via the per-layer options if your workload differs. There is no `RecommendedDefaults()` API on purpose: the constructor defaults are the single source of truth.
+</details>
+
+<details>
 <summary><b>Static PAT with ETag caching</b></summary>
 
 ```go
@@ -82,7 +98,27 @@ gh, err := ghkit.New(github.NewClient,
 )
 ```
 
-The default cache is a 4096-entry in-process LRU with a 256 MiB byte budget. That is safe to run in a long-lived process without watching it grow.
+The default cache is a 4096-entry in-process LRU with a 256 MiB byte budget; safe to run in a long-lived process without watching it grow.
+</details>
+
+<details>
+<summary><b>GraphQL with <code>shurcooL/githubv4</code></b></summary>
+
+```go
+import (
+    "github.com/shurcooL/githubv4"
+    ghkit "github.com/pcanilho/go-github-kit"
+)
+
+v4, err := ghkit.New(githubv4.NewClient,
+    ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
+    ghkit.WithRetry(),
+)
+```
+
+`ghkit.New` is generic; `githubv4.NewClient` satisfies `func(*http.Client) *githubv4.Client` and gets oauth2 + retry + ratelimit + throttle + UA from the transport stack. ETag caching is REST-only by design (the etag layer no-ops on POST), so `WithETagCache` is a no-op for v4 traffic; leave it off unless you also issue REST GETs through the same client.
+
+A runnable version lives at [`examples/graphql-v4/`](examples/graphql-v4/main.go).
 </details>
 
 <details>
@@ -148,6 +184,36 @@ source := oauth2.ReuseTokenSource(nil, &ghaitSource{ctx: ctx, factory: factory})
 
 Pass `source` to `ghkit.WithTokenSource` as in the recipe above.
 </details>
+</details>
+
+<details>
+<summary><b>Multi-tenant single client (one Transport, many installations)</b></summary>
+
+```go
+import (
+    "github.com/pcanilho/go-github-kit/etag"
+)
+
+type tenantKey struct{}
+
+cache := etag.NewLRUCache(8192)
+
+hc, err := ghkit.HTTPClient(
+    ghkit.WithTokenSource(perTenantTokenSource), // resolves token per req.Context()
+    ghkit.WithETagCache(
+        etag.WithCache(cache),
+        etag.WithAutoKeyScope(func(req *http.Request) (string, error) {
+            id, ok := req.Context().Value(tenantKey{}).(string)
+            if !ok || id == "" {
+                return "", fmt.Errorf("tenant id missing from request context")
+            }
+            return id, nil
+        }),
+    ),
+)
+```
+
+Use `WithAutoKeyScope` instead of `WithKeyScope` when one `*http.Client` serves N tenants (typical for warm Lambda pools fronting many GitHub App installations). The fn is invoked per request and must return either a non-empty scope or a non-nil error; an empty string with a nil error surfaces as `etag.ErrEmptyScope`. `WithKeyScope` and `WithAutoKeyScope` are mutually exclusive.
 </details>
 
 <details>

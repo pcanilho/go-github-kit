@@ -553,7 +553,7 @@ func TestRetry_TypeOfChainWalking(t *testing.T) {
 func TestRetry_TypeOfDepthCap(t *testing.T) {
 	// Build a 7-deep linear wrap chain: depth-cap should fire.
 	err := error(&errStruct{name: "leaf"})
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		err = fmt.Errorf("layer%d: %w", i, err)
 	}
 	got := typeOf(err)

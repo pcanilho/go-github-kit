@@ -5,6 +5,59 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-04-30
+
+Adds `etag.WithAutoKeyScope` so a single `*http.Client` can serve
+multiple tenants without provisioning N transports. Elevates GraphQL/v4
+to first-class billing in the docs: the generic factory already worked
+with `shurcooL/githubv4`, but the lead documentation framed the kit as
+a `google/go-github` (REST) wrapper. No new runtime dependencies in
+the root module.
+
+### Added
+
+- `etag.WithAutoKeyScope(fn func(*http.Request) (string, error))`: derives
+  the cache-key scope per request. Mutually exclusive with
+  `etag.WithKeyScope`; combining both yields `etag.ErrConflictingScope`.
+  Either option satisfies the caller-supplied-`Cache` scope requirement.
+- `etag.ErrEmptyScope`: sentinel wrapped and returned from `RoundTrip`
+  when the fn returns an empty string with a nil error. The contract is
+  "non-empty scope or non-nil error"; the empty + nil combination is a
+  programming error, not a bypass signal.
+- `etag.ErrConflictingScope`: sentinel surfaced at construction when both
+  `WithKeyScope` and `WithAutoKeyScope` are set.
+
+### Documentation
+
+- `doc.go` lead paragraph rewritten to name both `google/go-github` (REST)
+  and `shurcooL/githubv4` (GraphQL) as canonical factories. New
+  paragraphs document GraphQL/v4 compatibility (etag layer no-ops on
+  POST; v4 traffic flows through oauth2 + retry + ratelimit + throttle
+  + UA without ETag caching) and custom cache backends via the
+  three-method `etag.Cache` interface.
+- `README.md` lead paragraph elevates GraphQL/v4 to first-class billing.
+  New recipes: "Recommended setup for a long-lived service",
+  "GraphQL with shurcooL/githubv4", "Multi-tenant single client (one
+  Transport, many installations)".
+- `MIGRATION.md` Recipe 2 cross-references `WithAutoKeyScope` for the
+  multi-installation single-transport pattern.
+
+### Examples
+
+- `examples/installation-token/main.go` replaces the
+  `oauth2.StaticTokenSource` stand-in with an inline
+  `bradleyfalzon/ghinstallation/v2` to `oauth2.TokenSource` adapter
+  (the canonical local-key JWT signing path).
+- New `examples/graphql-v4/` runs a minimal `Viewer.Login` query through
+  `shurcooL/githubv4` over a ghkit-built `*http.Client`. Pins compile-time
+  compatibility with the v4 SDK in the examples CI lane.
+
+### Dependencies
+
+No changes in the root module. The `examples/` module gains
+`bradleyfalzon/ghinstallation/v2`, `golang-jwt/jwt/v4` (transitive),
+`shurcooL/githubv4`, and `shurcooL/graphql` (transitive).
+
 ## [1.2.1] - 2026-04-28
 
 Three bug fixes in transport behaviour and a small set of godoc clarifications.
@@ -333,6 +386,7 @@ and rotating PATs alike.
 - `golang.org/x/oauth2` v0.36.0
 - `golang.org/x/time` v0.15.0
 
+[1.3.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.3.0
 [1.2.1]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.2.1
 [1.2.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.2.0
 [1.1.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.1.0
