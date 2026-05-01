@@ -11,17 +11,23 @@
 //
 //	http.Client
 //	 UserAgent             (overwrites User-Agent)       [WithUserAgent]
-//	  Throttle             (x/time/rate proactive)       [WithRequestsPerSecond]
-//	   RateLimit           (go-github-ratelimit v2)      [default ON]
+//	  RateLimit            (go-github-ratelimit v2)      [default ON]
+//	   Throttle            (x/time/rate proactive)       [WithRequestsPerSecond]
 //	    Retry              (5xx + transient net errors)  [WithRetry]
 //	     oauth2.Transport  (clones req, sets Auth)       [WithToken/WithTokenSource]
 //	      ETag             (hashes auth'd clone)         [WithETagCache]
 //	       Base            (*http.Transport,
 //	                        DisableCompression=true)     [WithBaseTransport]
 //
-// Retry sits below RateLimit so 429s are deferred to the rate-limit layer;
-// sits above oauth2 so retried requests get the latest token via oauth2's
-// per-call Source.Token().
+// RateLimit above Throttle: a secondary cooldown parks new arrivals at
+// gofri's waitForRateLimit before they consume throttle tokens. Parked
+// requests release through Throttle at cooldown end, bounded by burst.
+// Pre-1.4 the order was inverted; parked requests stampeded at cooldown
+// end.
+//
+// Retry below both rate-limit layers: 429s are deferred to the reactive
+// limiter. Above oauth2: retried requests get the latest token via
+// oauth2's per-call Source.Token().
 //
 // The ETag precompute algorithm is the reason to use this kit. GitHub's
 // server-side ETag hash includes the Authorization header, so a passive

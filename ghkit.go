@@ -41,9 +41,10 @@ func HTTPClient(opts ...Option) (*http.Client, error) {
 	// our defaulted one (see prepend pattern below).
 	cfg.logger = cmp.Or(cfg.logger, slog.New(slog.DiscardHandler))
 
-	// Build inside-out: base -> etag -> oauth2 -> retry -> ratelimit -> throttle -> userAgent.
-	// ETag must sit below oauth2 so its hash domain sees the cloned
-	// Authorization header. UserAgent sits outermost so it overrides any
+	// Build inside-out: base -> etag -> oauth2 -> retry -> throttle -> ratelimit -> userAgent.
+	// ETag below oauth2: hash domain sees the cloned Authorization header.
+	// RateLimit above throttle: secondary cooldown parks new arrivals before
+	// they consume throttle tokens. UserAgent outermost: overrides any
 	// SDK-level value.
 	rt := cfg.baseTransport
 
@@ -75,17 +76,17 @@ func HTTPClient(opts ...Option) (*http.Client, error) {
 		rt = inner
 	}
 
-	if cfg.rateLimitEnabled {
-		rlOpts := append([]ratelimit.Option{ratelimit.WithLogger(cfg.logger)}, cfg.rateLimitOpts...)
-		rt = ratelimit.NewTransport(rt, rlOpts...)
-	}
-
 	if cfg.throttleRPS > 0 {
 		thr, err := throttle.NewTransport(rt, cfg.throttleRPS, throttle.WithBurst(cfg.throttleBurst))
 		if err != nil {
 			return nil, fmt.Errorf("ghkit: throttle: %w", err)
 		}
 		rt = thr
+	}
+
+	if cfg.rateLimitEnabled {
+		rlOpts := append([]ratelimit.Option{ratelimit.WithLogger(cfg.logger)}, cfg.rateLimitOpts...)
+		rt = ratelimit.NewTransport(rt, rlOpts...)
 	}
 
 	if cfg.userAgent != "" {

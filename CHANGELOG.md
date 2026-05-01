@@ -5,6 +5,25 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-05-01
+
+Inverts the throttle/ratelimit chain so RateLimit wraps Throttle.
+Pre-1.4 ordering let throttle keep admitting new requests during a
+gofri secondary cooldown; at cooldown end the parked requests
+stampeded the server simultaneously, re-tripping the abuse detector.
+Inverted ordering parks new arrivals inside gofri's `waitForRateLimit`
+before they consume throttle tokens, so post-cooldown release is
+bounded by the throttle burst.
+
+### Changed
+
+- Transport stack: `ratelimit` now wraps `throttle` instead of the
+  inverse. Callers using only one of the two layers see no behavior
+  change. Logger event ordering is inverted as a side effect: throttle
+  events now emit inside ratelimit's RoundTrip span rather than
+  wrapping it; observability dashboards keying on the legacy ordering
+  need adjustment.
+
 ## [1.3.0] - 2026-04-30
 
 Adds `etag.WithAutoKeyScope` so a single `*http.Client` can serve
@@ -386,6 +405,7 @@ and rotating PATs alike.
 - `golang.org/x/oauth2` v0.36.0
 - `golang.org/x/time` v0.15.0
 
+[1.3.1]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.3.1
 [1.3.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.3.0
 [1.2.1]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.2.1
 [1.2.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.2.0

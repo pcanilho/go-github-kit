@@ -57,8 +57,8 @@ For runnable starter programs, see [`examples/`](examples/): `static-pat`, `inst
 
 ```
 http.Client
- Throttle              (x/time/rate proactive)       [WithRequestsPerSecond]
-  RateLimit            (go-github-ratelimit v2)      [default ON]
+ RateLimit             (go-github-ratelimit v2)      [default ON]
+  Throttle             (x/time/rate proactive)       [WithRequestsPerSecond]
    Retry               (5xx + transient net errors)  [WithRetry]
     oauth2.Transport   (clones req, sets Auth)       [WithToken/WithTokenSource]
      ETag              (hashes auth'd clone)         [WithETagCache]
@@ -66,7 +66,7 @@ http.Client
                         DisableCompression=true)     [WithBaseTransport]
 ```
 
-Each layer is optional. The stack is opt-in: `ghkit.HTTPClient(...)` only includes the layers you asked for. The order is load-bearing, though. ETag sits below the oauth2 layer so it hashes the request with the current Authorization header. Rate limiting sits above so it sees every outgoing call including ETag-triggered conditional GETs. Retry sits below RateLimit so 429s are deferred to the rate-limit layer; sits above oauth2 so retried requests get the latest token via oauth2's per-call `Source.Token()`. The proactive throttle sits outermost so it caps issued RPS regardless of cache replays.
+Each layer is optional. The stack is opt-in: `ghkit.HTTPClient(...)` only includes the layers you asked for. The order is load-bearing. ETag sits below oauth2 so it hashes the request with the current Authorization header. RateLimit sits above Throttle so a secondary cooldown parks new arrivals at gofri's `waitForRateLimit` before they consume throttle tokens; parked requests release through Throttle at cooldown end, bounded by burst. Retry sits below both rate-limit layers so 429s are deferred to the reactive limiter; sits above oauth2 so retried requests get the latest token via oauth2's per-call `Source.Token()`.
 
 The rate-limit layer's named options (`WithPrimaryLimitDetected`, `WithSecondaryLimitDetected`, `WithTotalSleepLimit`, `WithLogger`) cover the common callbacks. For upstream features ghkit does not curate, `ratelimit.WithUpstreamOptions(opts ...any)` forwards raw options to `gofri/go-github-ratelimit/v2`.
 
