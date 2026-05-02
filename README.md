@@ -122,6 +122,51 @@ A runnable version lives at [`examples/graphql-v4/`](examples/graphql-v4/main.go
 </details>
 
 <details>
+<summary><b>Iterating over paginated results</b></summary>
+
+GitHub REST endpoints paginate via RFC 8288 Link headers. The `pages` sub-package walks them with a Go 1.23 range-over-func iterator, reusing the configured `*http.Client` so RateLimit, Throttle, Retry, oauth2, and ETag all apply per page automatically.
+
+```go
+import (
+    "context"
+    "fmt"
+    "net/http"
+    "os"
+
+    "github.com/google/go-github/v85/github"
+    ghkit "github.com/pcanilho/go-github-kit"
+    "github.com/pcanilho/go-github-kit/pages"
+)
+
+hc, err := ghkit.HTTPClient(
+    ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
+    ghkit.WithETagCache(),
+)
+if err != nil { panic(err) }
+
+headers := http.Header{
+    "Accept":               []string{"application/vnd.github+json"},
+    "X-GitHub-Api-Version": []string{"2022-11-28"},
+}
+
+var n int
+for repo, err := range pages.As[*github.Repository](
+    context.Background(), hc, "GET",
+    "https://api.github.com/user/repos?per_page=100", headers,
+) {
+    if err != nil { panic(err) }
+    fmt.Println(repo.GetFullName())
+    n++
+}
+fmt.Printf("total: %d\n", n)
+```
+
+`pages.As[T]` decodes each page into `[]T` and yields one element at a time; the iterator owns the response body. `pages.Pages` is the lower-level form that yields `*http.Response` per page when the caller wants to handle decoding directly.
+
+For tests, `ghtest.LinkHeader(baseURL, page, perPage, lastPage)` builds RFC 8288 Link header values. See [`examples/list-all-repos/`](examples/list-all-repos/main.go) for a runnable end-to-end demo.
+</details>
+
+<details>
 <summary><b>GitHub App installation tokens (JIT auth, shared cache)</b></summary>
 
 ```go

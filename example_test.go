@@ -1,6 +1,7 @@
 package ghkit_test
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 
 	ghkit "github.com/pcanilho/go-github-kit"
 	"github.com/pcanilho/go-github-kit/etag"
+	"github.com/pcanilho/go-github-kit/ghtest"
+	"github.com/pcanilho/go-github-kit/pages"
 	"github.com/pcanilho/go-github-kit/throttle"
 )
 
@@ -60,6 +63,50 @@ func Example_etagOnly() {
 	if err := resp.Body.Close(); err != nil {
 		fmt.Println("close:", err)
 	}
+}
+
+// Example_paginated walks a Link-paginated endpoint with the pages
+// sub-package. The fixture serves three pages of two items each; the
+// iterator yields one element at a time without the caller writing the
+// Link-walking loop.
+func Example_paginated() {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := 1
+		if p := r.URL.Query().Get("page"); p == "2" {
+			page = 2
+		} else if p == "3" {
+			page = 3
+		}
+		base := srv.URL + r.URL.Path
+		if link := ghtest.LinkHeader(base, page, 2, 3); link != "" {
+			w.Header().Set("Link", link)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case 1:
+			fmt.Fprint(w, `[{"id":1},{"id":2}]`)
+		case 2:
+			fmt.Fprint(w, `[{"id":3},{"id":4}]`)
+		case 3:
+			fmt.Fprint(w, `[{"id":5},{"id":6}]`)
+		}
+	}))
+	defer srv.Close()
+
+	type item struct {
+		ID int `json:"id"`
+	}
+	var ids []int
+	for it, err := range pages.As[item](context.Background(), srv.Client(), "GET", srv.URL+"/items", nil) {
+		if err != nil {
+			fmt.Println("err:", err)
+			return
+		}
+		ids = append(ids, it.ID)
+	}
+	fmt.Println(ids)
+	// Output: [1 2 3 4 5 6]
 }
 
 // Example_throttle wraps any http.RoundTripper in a token-bucket cap.

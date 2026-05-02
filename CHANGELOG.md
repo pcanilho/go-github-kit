@@ -5,6 +5,71 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-05-02
+
+Adds a `pages` sub-package: a Go 1.23 range-over-func iterator for
+Link-header pagination, plus a typed wrapper that decodes each page
+into elements of any type. The iterator runs on a caller-supplied
+`*http.Client`, so the existing RateLimit, Throttle, Retry, oauth2,
+and ETag layers apply per page with no extra wiring. Also extends
+`ghtest` with a `LinkHeader` fixture builder so tests can construct
+RFC 8288 Link headers without rolling their own. No new runtime
+dependencies in the root module.
+
+### Added
+
+- `pages.Pages(ctx, client, method, url, headers)`: range-over-func
+  iterator over paginated REST responses. Walks `Link: rel="next"`
+  and yields each `*http.Response`. Caller drains and closes each
+  body. Errors stop iteration after one yield; a clean end of
+  pagination (no `rel="next"`) stops silently.
+- `pages.As[T any](ctx, client, method, url, headers)`: typed wrapper
+  that decodes each page into `[]T` with the standard library JSON
+  decoder and yields elements one at a time. Iterator owns each
+  response body and closes it after decoding, including on caller
+  break and on context cancellation. `T` has no constraint, so
+  `*github.Repository` and similar SDK types work without
+  implementing `json.Unmarshaler`.
+- `pages.ErrInvalidLinkHeader`: exported sentinel surfaced when a
+  response Link header is structurally malformed. A missing
+  `rel="next"` is treated as a clean end of pagination, not an error.
+- `ghtest.LinkHeader(baseURL, page, perPage, lastPage)`: builds an
+  RFC 8288 Link header value for fixture servers. Returns "" when
+  `lastPage <= 1` so handlers can branch on a single string. Pairs
+  with `ghtest.Write304IfMatch` and `ghtest.WriteSecondaryLimit`.
+
+### Documentation
+
+- `doc.go` adds a paragraph naming the `pages` sub-package alongside
+  the existing `etag`, `ratelimit`, and `throttle` notes.
+- `README.md` adds an "Iterating over paginated results" recipe under
+  the Recipes section, with a runnable snippet using `pages.As` plus
+  `WithETagCache`.
+- `TESTING.md` replaces the manual Link-header pagination recipe with
+  one that uses `ghtest.LinkHeader`, mirroring how the
+  secondary-rate-limit recipe references `ghtest.WriteSecondaryLimit`.
+- `examples/README.md` adds the `list-all-repos/` row to the table.
+
+### Examples
+
+- New `examples/list-all-repos/`: uses `pages.As[*github.Repository]`
+  to walk `/user/repos` against `api.github.com` end to end. Shows
+  the iterator composing with `WithETagCache` and `WithUserAgent`.
+
+### Dependencies
+
+No changes in the root module. The `examples/` module is unchanged.
+
+### Tooling
+
+- `.golangci.yaml`: `bodyclose` added to the test-file linter
+  exclusion list. The iter.Seq2 yield-then-close pattern in
+  `pages_test.go` produces false positives the linter cannot trace
+  through; the suppression is scoped to `_test.go` paths so production
+  code still gets full bodyclose coverage. The two `//nolint:bodyclose`
+  directives in `pages/pages.go` remain (caller-closes contract on
+  yielded responses; close-via-decodePage on the typed wrapper).
+
 ## [1.3.1] - 2026-05-01
 
 Inverts the throttle/ratelimit chain so RateLimit wraps Throttle.

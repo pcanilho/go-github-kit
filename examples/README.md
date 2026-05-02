@@ -27,5 +27,6 @@ When **copying an example into your own project**: drop the `replace` directive 
 | `backfill/`               | Backfill / batch jobs: ETag cache + a client-side requests-per-second cap.    |
 | `github-enterprise/`      | Targeting GitHub Enterprise Server via `WithEnterpriseURLs` and a custom user agent. |
 | `retry-on-flaky/`         | `WithRetry` with a tuned backoff and a custom predicate that opts POST in via `Idempotency-Key`. |
+| `list-all-repos/`         | Walks `/user/repos` with `pages.As[*github.Repository]` over Link headers; demonstrates per-page ETag composition. |
 
 Each example reads its credentials from environment variables (e.g. `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`) and calls `gh.Repositories.Get(...)` as a smoke test. They will fail at the API call without valid credentials. That's expected; they're starting templates, not standalone tools.

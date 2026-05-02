@@ -107,37 +107,40 @@ func writeRateLimit(w http.ResponseWriter, remaining int, reset time.Time) {
 
 ## Recipe: Link-header pagination
 
-First page omits `prev` and `first`. Last page omits `next` and `last`.
-Single-page responses (`lastPage <= 1`) omit the Link header entirely.
+`ghtest.LinkHeader(baseURL, page, perPage, lastPage)` builds the RFC
+8288 Link header value for a given fixture page. First page omits
+`prev` and `first`; last page omits `next` and `last`; `lastPage <= 1`
+returns an empty string so the handler can skip setting the header on
+single-page responses.
 
 ```go
 import (
-    "fmt"
     "net/http"
-    "strings"
+    "net/http/httptest"
+
+    "github.com/pcanilho/go-github-kit/ghtest"
 )
 
-func writeLinkPage(w http.ResponseWriter, baseURL string, page, perPage, lastPage int) {
-    if lastPage <= 1 {
-        return
-    }
-    var parts []string
-    add := func(p int, rel string) {
-        parts = append(parts, fmt.Sprintf(`<%s?page=%d&per_page=%d>; rel="%s"`, baseURL, p, perPage, rel))
-    }
-    if page > 1 {
-        add(page-1, "prev")
-    }
-    if page < lastPage {
-        add(page+1, "next")
-        add(lastPage, "last")
-    }
-    if page > 1 {
-        add(1, "first")
-    }
-    w.Header().Set("Link", strings.Join(parts, ", "))
+func paginatedFixture(t *testing.T, perPage, lastPage int) *httptest.Server {
+    var srv *httptest.Server
+    srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        page := 1
+        if p := r.URL.Query().Get("page"); p != "" {
+            page, _ = strconv.Atoi(p)
+        }
+        base := srv.URL + r.URL.Path
+        if link := ghtest.LinkHeader(base, page, perPage, lastPage); link != "" {
+            w.Header().Set("Link", link)
+        }
+        // ... write the page body
+    }))
+    return srv
 }
 ```
+
+Pair this with the `pages` sub-package on the call site to walk the
+fixture without writing the loop yourself; see the
+"Iterating over paginated results" recipe in the README.
 
 ## Recipe: secondary rate limits
 

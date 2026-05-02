@@ -56,7 +56,9 @@
 //     per-reconcile installation token.
 //
 // Sub-packages (etag, ratelimit, throttle) are independently importable
-// for callers composing their own stack.
+// for callers composing their own stack. The pages sub-package adds a
+// Go 1.23 range-over-func iterator over Link-header pagination that
+// runs on any *http.Client, so the configured stack applies per page.
 //
 // # GraphQL / v4 compatibility
 //

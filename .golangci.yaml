@@ -86,6 +86,7 @@ linters:
     generated: lax
     rules:
       - linters:
+          - bodyclose
           - dupl
           - errcheck
           - gocyclo

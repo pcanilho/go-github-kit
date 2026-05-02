@@ -47,3 +47,62 @@ func TestWriteSecondaryLimit_negativeClampsToZero(t *testing.T) {
 		t.Errorf("Retry-After = %q, want %q", got, "0")
 	}
 }
+
+func TestLinkHeader_First(t *testing.T) {
+	got := ghtest.LinkHeader("https://api.example/items", 1, 30, 3)
+	want := `<https://api.example/items?page=2&per_page=30>; rel="next", <https://api.example/items?page=3&per_page=30>; rel="last"`
+	if got != want {
+		t.Errorf("LinkHeader(first) =\n  %q\nwant\n  %q", got, want)
+	}
+	if strings.Contains(got, `rel="prev"`) {
+		t.Errorf("first page must not include prev: %q", got)
+	}
+	if strings.Contains(got, `rel="first"`) {
+		t.Errorf("first page must not include first: %q", got)
+	}
+}
+
+func TestLinkHeader_Middle(t *testing.T) {
+	got := ghtest.LinkHeader("https://api.example/items", 2, 30, 3)
+	wantParts := []string{
+		`<https://api.example/items?page=1&per_page=30>; rel="prev"`,
+		`<https://api.example/items?page=3&per_page=30>; rel="next"`,
+		`<https://api.example/items?page=3&per_page=30>; rel="last"`,
+		`<https://api.example/items?page=1&per_page=30>; rel="first"`,
+	}
+	for _, p := range wantParts {
+		if !strings.Contains(got, p) {
+			t.Errorf("middle page header missing %q in %q", p, got)
+		}
+	}
+}
+
+func TestLinkHeader_Last(t *testing.T) {
+	got := ghtest.LinkHeader("https://api.example/items", 3, 30, 3)
+	want := `<https://api.example/items?page=2&per_page=30>; rel="prev", <https://api.example/items?page=1&per_page=30>; rel="first"`
+	if got != want {
+		t.Errorf("LinkHeader(last) =\n  %q\nwant\n  %q", got, want)
+	}
+	if strings.Contains(got, `rel="next"`) {
+		t.Errorf("last page must not include next: %q", got)
+	}
+	if strings.Contains(got, `rel="last"`) {
+		t.Errorf("last page must not include last: %q", got)
+	}
+}
+
+func TestLinkHeader_SinglePage(t *testing.T) {
+	if got := ghtest.LinkHeader("https://api.example/items", 1, 30, 1); got != "" {
+		t.Errorf("single-page LinkHeader = %q, want empty", got)
+	}
+	if got := ghtest.LinkHeader("https://api.example/items", 1, 30, 0); got != "" {
+		t.Errorf("zero-lastPage LinkHeader = %q, want empty", got)
+	}
+}
+
+func TestLinkHeader_PerPagePropagates(t *testing.T) {
+	got := ghtest.LinkHeader("https://api.example/items", 1, 100, 2)
+	if !strings.Contains(got, "per_page=100") {
+		t.Errorf("LinkHeader did not propagate per_page=100: %q", got)
+	}
+}
