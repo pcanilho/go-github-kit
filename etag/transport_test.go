@@ -13,12 +13,17 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/pcanilho/go-github-kit/cond"
 )
 
 // ghServer simulates GitHub's server-side ETag behaviour: it hashes the
 // current request headers + body with our algorithm, returns that as the
 // ETag on 200 responses, and checks incoming If-None-Match against the
 // same hash to decide 304 vs 200.
+//
+// Identical to ghtest.ETagServer; defined here to keep the etag package
+// tests self-contained and avoid an import cycle (ghtest imports etag).
 func ghServer(t *testing.T, body []byte) (*httptest.Server, *int64) {
 	t.Helper()
 	var reqs int64
@@ -916,4 +921,109 @@ func TestETag_AutoKeyScope_ErrorPropagates(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("want wrapped sentinel; got %v", err)
 	}
+}
+
+// TestETag_WireStore_SetsCacheMissHeader pins that on a cold-cache GET
+// (wire 200 stored in cache), the response surfaces with
+// cond.HeaderCacheStatus="miss" so consumers can observe the cache
+// state via cond.StatusOf.
+func TestETag_WireStore_SetsCacheMissHeader(t *testing.T) {
+	body := []byte("hello")
+	s, _ := ghServer(t, body)
+	c := newTestClient(t)
+
+	resp, err := c.Get(s.URL + "/users/a")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if got := resp.Header.Get(cond.HeaderCacheStatus); got != "miss" {
+		t.Fatalf("X-Ghkit-Cache=%q want miss on wire-200 store", got)
+	}
+}
+
+// TestETag_SynthHit_SetsCacheHitHeader pins that on a cache-hit
+// (304 from upstream synthesised to a 200 with the cached body), the
+// response surfaces with cond.HeaderCacheStatus="hit".
+func TestETag_SynthHit_SetsCacheHitHeader(t *testing.T) {
+	body := []byte("hello")
+	s, _ := ghServer(t, body)
+	c := newTestClient(t)
+
+	// Cold miss to populate the cache.
+	r1 := doGet(t, c, s.URL+"/users/a")
+	if r1.StatusCode != http.StatusOK {
+		t.Fatalf("first status=%d want 200", r1.StatusCode)
+	}
+	if got := r1.Header.Get(cond.HeaderCacheStatus); got != "miss" {
+		t.Fatalf("first X-Ghkit-Cache=%q want miss", got)
+	}
+	// Warm hit: synth-200 from cache.
+	r2 := doGet(t, c, s.URL+"/users/a")
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("second status=%d want 200 (synth)", r2.StatusCode)
+	}
+	if got := r2.Header.Get(cond.HeaderCacheStatus); got != "hit" {
+		t.Fatalf("second X-Ghkit-Cache=%q want hit", got)
+	}
+}
+
+// TestETag_CacheAdd_DoesNotIngestCacheStatusHeader pins the
+// regression-sensitive line: the wire-200 store path takes
+// resp.Header.Clone() into Entry.Headers BEFORE setting the cache
+// status on resp.Header. A swap of that ordering would poison shared
+// caches (Redis, etc.) by replaying "miss" on every hit.
+func TestETag_CacheAdd_DoesNotIngestCacheStatusHeader(t *testing.T) {
+	body := []byte("hello")
+	s, _ := ghServer(t, body)
+
+	counting := &captureCache{inner: NewLRUCache(16)}
+	rt := newTestTransport(t, WithCache(counting), WithKeyScope("invariant-test"))
+	c := &http.Client{Transport: rt}
+
+	resp, err := c.Get(s.URL + "/users/a")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	// Caller's response must carry the miss header.
+	if got := resp.Header.Get(cond.HeaderCacheStatus); got != "miss" {
+		t.Fatalf("caller's X-Ghkit-Cache=%q want miss", got)
+	}
+	// The cached Entry's Headers must NOT carry the cache-status key.
+	stored := counting.lastEntry()
+	if stored == nil {
+		t.Fatal("expected cache.Add to have been called")
+	}
+	if got := stored.Headers.Get(cond.HeaderCacheStatus); got != "" {
+		t.Fatalf("Entry.Headers carried X-Ghkit-Cache=%q; cache poisoned", got)
+	}
+}
+
+// captureCache wraps a Cache and records the most recently Add'd Entry
+// so tests can inspect what was stored.
+type captureCache struct {
+	inner Cache
+	mu    sync.Mutex
+	last  *Entry
+}
+
+func (c *captureCache) Get(ctx context.Context, k string) (Entry, bool, error) {
+	return c.inner.Get(ctx, k)
+}
+func (c *captureCache) Add(ctx context.Context, k string, e Entry) error {
+	c.mu.Lock()
+	cp := e
+	c.last = &cp
+	c.mu.Unlock()
+	return c.inner.Add(ctx, k, e)
+}
+func (c *captureCache) Remove(ctx context.Context, k string) error {
+	return c.inner.Remove(ctx, k)
+}
+func (c *captureCache) lastEntry() *Entry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.last
 }

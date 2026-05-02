@@ -13,10 +13,19 @@
 // the ratelimit package without the two layers fighting.
 //
 // Backoff uses decorrelated jitter with caller-supplied min/max bounds.
-// Server-supplied Retry-After (delta-seconds or HTTP-date) overrides the
-// jitter; if it exceeds the operator's maxDelay the call returns
-// ErrRetryAfterExceedsMax with the prior response (which the caller must
-// Close).
+// Server-supplied Retry-After (delta-seconds or HTTP-date per RFC 9110
+// section 10.2.3) overrides the jitter; if it exceeds the operator's maxDelay
+// the call returns (nil, ErrRetryAfterExceedsMax) and the transport drains
+// and closes the prior response itself. When the header is present but
+// unparseable (off-spec date format, RFC 3339 / ISO 8601, garbage), retry
+// falls back to the jitter sleep, the retry_sleep event labels source as
+// "malformed", and a retry_retry_after_unparseable event is emitted at Warn
+// level.
+//
+// RetryAfter is the parser exposed for sibling packages (e.g. polling) that
+// want to honor server hints without duplicating the parse logic. It returns
+// (0, false) for absent, unparseable, and negative-numeric values; (d, true)
+// otherwise.
 //
 // Caller-context cancellation is terminal: req.Context().Err() != nil stops
 // retries before any predicate is consulted, including a user-supplied

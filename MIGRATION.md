@@ -211,3 +211,55 @@ After swapping, before merging:
 - `go test ./...` and `go vet ./...` in your repo: tests that mocked the in-tree etag transport will need to mock against ghkit's `etag.NewTransport` or against a higher-level `*http.Client`.
 - Confirm `errors.As(err, &primaryRateLimit)` still unwraps the `*github_primary_ratelimit.RateLimitReachedError` your controller relies on (it does, ghkit re-uses gofri unchanged).
 - If you keep your own metric emitter, wrap it as a RoundTripper above the `*http.Client` returned by `ghkit.HTTPClient(...)` rather than relying on ghkit's slog events for per-route labels.
+
+## Recipe 4 (1.5): consumer utilities round (`polling`, `search`, `cond`)
+
+Three consumer-facing iterators ship in v1.5.0. Each composes with the
+existing transport stack via the shared `*http.Client` and adds no new
+runtime dependencies in the root module.
+
+### `polling`: long-running operations
+
+Replace ad-hoc `time.Ticker` loops with a range-over-func iterator:
+
+```go
+seq := polling.As[*github.WorkflowRun](ctx, hc, http.MethodGet, runURL, headers, nil,
+    15*time.Second,
+    polling.WithDoneT(func(r *github.WorkflowRun) bool { return r.GetStatus() == "completed" }),
+    polling.WithMaxWallClock(30*time.Minute),
+)
+for run, err := range seq { /* ... */ }
+```
+
+Each `c.Do` benefits from retry, etag, ratelimit, throttle, oauth2.
+Recommend `retry.WithMaxAttempts(1)` on the client when polling owns
+the outer loop, otherwise retry's per-attempt jitter compounds with
+the polling interval.
+
+### `search`: envelope-shaped pagination
+
+`pages.As[T]` cannot serve `/search/*` (envelope, not array). Use
+`search.Issues[T]` etc. and surface `IncompleteResults` /
+`ErrResultCapHit` per page:
+
+```go
+for r, err := range search.Issues[*github.Issue](ctx, hc, q, search.WithPerPage(100)) {
+    if errors.Is(err, search.ErrResultCapHit) { /* refine query */ break }
+    /* ... */
+}
+```
+
+### `cond`: visible 304
+
+The etag layer used to erase the change-vs-unchanged signal before the
+caller saw it. v1.5.0 surfaces it via `cond.HeaderCacheStatus`
+(`"X-Ghkit-Cache"`) on the response, mapped to `cond.Status` by
+`cond.StatusOf(resp)`. Use `cond.Fetch[T]` for one-shot conditional
+GETs, or `polling.WithChangeOnly` to silently skip polling iterations
+on cache hits.
+
+No API breaks. The new `X-Ghkit-Cache` response header is additive;
+existing consumers ignore it. The exported `retry.RetryAfter` is a
+new symbol consumed internally by `polling`; consumers can use it for
+their own Retry-After parsing without depending on the unexported
+`parseOutcome` enum.

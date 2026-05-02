@@ -5,6 +5,116 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-05-02
+
+Adds three consumer-utility sub-packages that ride on top of the
+assembled `*http.Client` and compose with the existing transport
+stack: `polling` (range-over-func iterator over an HTTP endpoint on
+an interval), `search` (envelope iterator for `/search/*` endpoints
+that `pages.As[T]` cannot serve), and `cond` (visible 304 / change-
+vs-unchanged signal building on the etag layer). Hardens `retry`'s
+`Retry-After` parser as part of the same release.
+
+### Fixed
+
+- `retry`: `Retry-After` parser saturates extremely large delta-seconds
+  values (above `math.MaxInt64 / int64(time.Second)`) instead of wrapping
+  int64 nanoseconds. Clamped values route through the existing
+  `ErrRetryAfterExceedsMax` abort path.
+- `retry`: whitespace around `Retry-After` values (`" 5"`, `"5 "`) is now
+  trimmed before parsing.
+
+### Added
+
+- `polling.Poll` and `polling.As[T]`: Go 1.23 range-over-func iterator
+  that re-issues a request on a caller-tunable interval, reusing the
+  supplied `*http.Client` so retry, etag, ratelimit, throttle, and
+  oauth2 apply per attempt. Options: `WithDone` (header/status
+  predicate), `WithDoneT[T]` (typed predicate on the decoded value),
+  `WithDecode[T]` (custom decoder), `WithChangeOnly` (skip yields on
+  cache hit), `WithMaxAttempts`, `WithMaxWallClock`, `WithJitter`
+  (deterministic mid-point), `WithHonorRetryAfter`, `WithLogger`,
+  plus `WithSleepFunc` / `WithNowFunc` test seams. Sentinels
+  `ErrMaxAttemptsExceeded`, `ErrMaxWallClockExceeded` (wraps
+  `context.DeadlineExceeded`), `ErrInvalidInterval`,
+  `ErrInvalidOption`, `ErrPredicatePanic`. Boundary yields surface
+  `(lastResp, sentinel)` so the caller can inspect what triggered
+  the limit.
+- `search.Issues`, `search.Code`, `search.Repos`, `search.Users`:
+  typed iterators over GitHub's `/search/*` envelope endpoints.
+  Yields `Result[T]{Item, TotalCount, IncompleteResults}` per item;
+  surfaces the post-page-10 1000-result hard cap as
+  `ErrResultCapHit`. Reuses `pages.Pages` for Link-header walking.
+  Functional options (`WithBaseURL`, `WithPerPage`, `WithSort`,
+  `WithOrder`, `WithHeaders`) match the convention used by the rest
+  of ghkit; `WithBaseURL` overrides the GitHub default for GHES or
+  test fixtures.
+- `cond.Status`, `cond.StatusOf`, `cond.Fetch[T]`: surfaces the
+  change-vs-unchanged signal the etag layer already computes.
+  `cond.HeaderCacheStatus` is the canonical `"X-Ghkit-Cache"` header
+  the etag layer sets on synth-200 (`"hit"`) and wire-200 store
+  (`"miss"`). `StatusOf` is nil-safe and maps absent to `Updated`.
+  Sentinel errors `cond.ErrNilClient`, `cond.ErrNilContext`,
+  `cond.ErrNilRequest` for invalid `Fetch` arguments. Decode errors
+  wrap as `cond: decode: %w` for parity with pages, polling, search.
+- `etag/transport.go`: sets `cond.HeaderCacheStatus` on synth-200
+  (after header merge) and wire-200 (after `cache.Add` returns) so
+  the cache does not ingest the key. Drift detector and
+  `ComputeExpectedETag` are unaffected (the header is response-only
+  and not in the hash domain).
+- `retry.RetryAfter(resp) (time.Duration, bool)`: exported wrapper
+  around `parseRetryAfter`. Returns `(0, false)` for absent,
+  unparseable, AND negative-numeric values. Used by `polling` to
+  honor server hints without duplicating the parser.
+- `ghtest.ETagServer(t, body) (*httptest.Server, *int64)`: lifted
+  from `etag/transport_test.go`. Used by polling, cond, and any
+  future test that exercises etag composition.
+- `retry`: `retry_retry_after_unparseable` slog event at Warn when
+  the header is present but matches neither delta-seconds nor
+  HTTP-date. Carries a length-bounded, ASCII-sanitised `raw`
+  attribute (32 bytes max).
+- `retry`: `retry_sleep` event's `source` attribute gains a
+  `"malformed"` value, distinct from `"jitter"` and `"retry_after"`.
+- `retry`: `FuzzParseRetryAfter` fuzz test pinning the parser as
+  total.
+
+### Documentation
+
+- New `polling/doc.go`, `search/doc.go`, `cond/doc.go` documenting
+  contracts and sharp edges (retry compounding, throttle backpressure,
+  etag synth-200 sameness, gofri ctx-cancel observed on next
+  round-trip, header set ordering for the cond signal).
+- `retry/doc.go` documents the unparseable arm and the
+  `source="malformed"` label.
+- `pages/doc.go`: corrected the stale chain-order note (predates the
+  v1.4.0 ratelimit/throttle inversion).
+- `README.md`: Go Report Card badge added; coverage badge skipped
+  (peer cohort split: 3 of 4 transport-utility libraries do not
+  carry one).
+
+### Examples
+
+- New `examples/poll-workflow-run/`: waits for a workflow run to
+  reach `status="completed"` via `polling.As[*github.WorkflowRun]`
+  with `WithDoneT`, `WithMaxWallClock`, `WithJitter`. Pairs polling
+  with `WithETagCache` so unchanged ticks short-circuit at the etag
+  layer.
+- New `examples/search-issues/`: walks `/search/issues` with
+  `search.Issues[*github.Issue]`, surfaces `incomplete_results` and
+  the 1000-result cap.
+- New `examples/conditional-fetch/`: visible 304 via
+  `cond.Fetch[*github.Repository]`; the second call returns
+  `cond.Unchanged` so downstream work can be skipped.
+
+### Tooling
+
+- `polling`, `search`, and `cond` introduce no new runtime
+  dependencies in the root module. The `ghtest.ETagServer` lift adds
+  no module surface; `cond` is stdlib-only; `polling` imports `cond`
+  and `retry`; `search` imports `pages`. The import graph remains
+  acyclic (`etag -> cond`, `polling -> cond, retry`, `search ->
+  pages`).
+
 ## [1.4.0] - 2026-05-02
 
 Adds a `pages` sub-package: a Go 1.23 range-over-func iterator for
@@ -470,6 +580,8 @@ and rotating PATs alike.
 - `golang.org/x/oauth2` v0.36.0
 - `golang.org/x/time` v0.15.0
 
+[1.5.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.5.0
+[1.4.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.4.0
 [1.3.1]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.3.1
 [1.3.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.3.0
 [1.2.1]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.2.1

@@ -28,5 +28,8 @@ When **copying an example into your own project**: drop the `replace` directive 
 | `github-enterprise/`      | Targeting GitHub Enterprise Server via `WithEnterpriseURLs` and a custom user agent. |
 | `retry-on-flaky/`         | `WithRetry` with a tuned backoff and a custom predicate that opts POST in via `Idempotency-Key`. |
 | `list-all-repos/`         | Walks `/user/repos` with `pages.As[*github.Repository]` over Link headers; demonstrates per-page ETag composition. |
+| `poll-workflow-run/`      | Waits for a workflow run to reach `status="completed"` with `polling.As[*github.WorkflowRun]` + `WithDoneT` + `WithMaxWallClock` + `WithJitter`. |
+| `search-issues/`          | Walks `/search/issues` with `search.Issues[*github.Issue]`; surfaces `incomplete_results` and the 1000-result cap as `ErrResultCapHit`. |
+| `conditional-fetch/`      | Visible 304: `cond.Fetch[*github.Repository]` returns `cond.Unchanged` on the second call so downstream work can be skipped. |
 
-Each example reads its credentials from environment variables (e.g. `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`) and calls `gh.Repositories.Get(...)` as a smoke test. They will fail at the API call without valid credentials. That's expected; they're starting templates, not standalone tools.
+Each example reads its credentials from environment variables (e.g. `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`) and exercises one or more REST endpoints. They will fail at the API call without valid credentials. That's expected; they're starting templates, not standalone tools.

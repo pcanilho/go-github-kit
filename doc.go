@@ -55,10 +55,15 @@
 //     canonical pattern for Kubernetes operators that reconcile with a
 //     per-reconcile installation token.
 //
-// Sub-packages (etag, ratelimit, throttle) are independently importable
-// for callers composing their own stack. The pages sub-package adds a
-// Go 1.23 range-over-func iterator over Link-header pagination that
-// runs on any *http.Client, so the configured stack applies per page.
+// Sub-packages (etag, ratelimit, retry, throttle) are independently
+// importable for callers composing their own stack. The pages
+// sub-package adds a Go 1.23 range-over-func iterator over Link-header
+// pagination; polling iterates an HTTP endpoint on a caller-tunable
+// interval (workflow run / check run completion); search wraps
+// `/search/*` envelope endpoints with cap and incomplete-results
+// awareness; cond surfaces the change-vs-unchanged signal computed
+// by the etag layer. All four run on any *http.Client, so the
+// configured transport stack applies per attempt.
 //
 // # GraphQL / v4 compatibility
 //

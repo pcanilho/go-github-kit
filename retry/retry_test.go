@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -566,19 +568,35 @@ func TestRetry_ParseRetryAfter(t *testing.T) {
 	// Cases store the header value (or nilResp) so the *http.Response is
 	// constructed inside the loop body. bodyclose can't track responses
 	// through table literals; constructing in-loop sidesteps that.
+	farFuture := time.Now().Add(45 * time.Minute)
+	farPast := time.Now().Add(-45 * time.Minute)
 	cases := []struct {
-		name    string
-		header  string // Retry-After value; ignored when nilResp is true
-		nilResp bool
-		want    time.Duration
+		name        string
+		header      string // Retry-After value; ignored when nilResp is true
+		nilResp     bool
+		wantOutcome parseOutcome
+		// wantDur is checked exactly when wantOutcome is Absent, Unparseable,
+		// or Numeric. For date outcomes the test asserts a tolerance window.
+		wantDur time.Duration
 	}{
-		{name: "nil-resp", nilResp: true, want: 0},
-		{name: "missing", header: "", want: 0},
-		{name: "delta-positive", header: "5", want: 5 * time.Second},
-		{name: "delta-zero", header: "0", want: time.Nanosecond},
-		{name: "delta-negative", header: "-3", want: 0},
-		{name: "garbage", header: "not a date", want: 0},
-		{name: "http-date-past", header: "Mon, 02 Jan 2006 15:04:05 GMT", want: 0},
+		{name: "nil-resp", nilResp: true, wantOutcome: outcomeAbsent, wantDur: 0},
+		{name: "missing", header: "", wantOutcome: outcomeAbsent, wantDur: 0},
+		{name: "delta-positive", header: "5", wantOutcome: outcomeNumeric, wantDur: 5 * time.Second},
+		{name: "delta-zero", header: "0", wantOutcome: outcomeNumeric, wantDur: time.Nanosecond},
+		{name: "delta-negative", header: "-3", wantOutcome: outcomeNumeric, wantDur: 0},
+		{name: "delta-leading-space", header: " 5", wantOutcome: outcomeNumeric, wantDur: 5 * time.Second},
+		{name: "delta-trailing-space", header: "5 ", wantOutcome: outcomeNumeric, wantDur: 5 * time.Second},
+		{name: "delta-both-spaces", header: " 5 ", wantOutcome: outcomeNumeric, wantDur: 5 * time.Second},
+		{name: "delta-fractional", header: "5.0", wantOutcome: outcomeUnparseable, wantDur: 0},
+		{name: "delta-overflows-int64-nanos", header: "10000000000", wantOutcome: outcomeNumeric, wantDur: maxDelayCeiling + time.Hour},
+		{name: "delta-just-below-threshold", header: "9223372036", wantOutcome: outcomeNumeric, wantDur: 9223372036 * time.Second},
+		{name: "delta-just-above-threshold", header: "9223372037", wantOutcome: outcomeNumeric, wantDur: maxDelayCeiling + time.Hour},
+		{name: "delta-maxint64", header: strconv.FormatInt(math.MaxInt64, 10), wantOutcome: outcomeNumeric, wantDur: maxDelayCeiling + time.Hour},
+		{name: "garbage", header: "not a date", wantOutcome: outcomeUnparseable, wantDur: 0},
+		{name: "iso-8601", header: "2026-01-02T15:04:05Z", wantOutcome: outcomeUnparseable, wantDur: 0},
+		{name: "rfc1123-utc-literal", header: farFuture.UTC().Format("Mon, 02 Jan 2006 15:04:05 UTC"), wantOutcome: outcomeUnparseable, wantDur: 0},
+		{name: "http-date-past", header: farPast.UTC().Format(http.TimeFormat), wantOutcome: outcomeDate},
+		{name: "http-date-future", header: farFuture.UTC().Format(http.TimeFormat), wantOutcome: outcomeDate},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -590,11 +608,179 @@ func TestRetry_ParseRetryAfter(t *testing.T) {
 				}
 				defer func() { _ = resp.Body.Close() }()
 			}
-			got := parseRetryAfter(resp)
-			if got != tc.want {
-				t.Fatalf("parseRetryAfter=%v want %v", got, tc.want)
+			gotDur, gotOutcome := parseRetryAfter(resp)
+			if gotOutcome != tc.wantOutcome {
+				t.Fatalf("outcome=%v want %v", gotOutcome, tc.wantOutcome)
+			}
+			switch tc.wantOutcome {
+			case outcomeAbsent, outcomeUnparseable, outcomeNumeric:
+				if gotDur != tc.wantDur {
+					t.Fatalf("duration=%v want %v", gotDur, tc.wantDur)
+				}
+			case outcomeDate:
+				if tc.name == "http-date-past" {
+					if gotDur != 0 {
+						t.Fatalf("past date duration=%v want 0", gotDur)
+					}
+				} else {
+					if gotDur < 44*time.Minute || gotDur > 46*time.Minute {
+						t.Fatalf("future date duration=%v outside [44m,46m]", gotDur)
+					}
+				}
 			}
 		})
+	}
+}
+
+func TestRetry_RetryAfter(t *testing.T) {
+	farFuture := time.Now().Add(45 * time.Minute)
+	cases := []struct {
+		name     string
+		header   string
+		nilResp  bool
+		wantDur  time.Duration
+		wantOk   bool
+		wantSkew time.Duration
+	}{
+		{name: "nil-resp", nilResp: true},
+		{name: "absent"},
+		{name: "delta-positive", header: "5", wantDur: 5 * time.Second, wantOk: true},
+		{name: "delta-zero", header: "0", wantDur: time.Nanosecond, wantOk: true},
+		{name: "delta-negative", header: "-3"},
+		{name: "delta-leading-space", header: " 5", wantDur: 5 * time.Second, wantOk: true},
+		{name: "garbage", header: "not a date"},
+		{name: "iso-8601", header: "2026-01-02T15:04:05Z"},
+		{name: "rfc1123-utc-literal", header: farFuture.UTC().Format("Mon, 02 Jan 2006 15:04:05 UTC")},
+		{name: "http-date-future", header: farFuture.UTC().Format(http.TimeFormat), wantDur: 45 * time.Minute, wantOk: true, wantSkew: time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var resp *http.Response
+			if !tc.nilResp {
+				resp = &http.Response{Header: make(http.Header), Body: http.NoBody}
+				if tc.header != "" {
+					resp.Header.Set("Retry-After", tc.header)
+				}
+				defer func() { _ = resp.Body.Close() }()
+			}
+			gotDur, gotOk := RetryAfter(resp)
+			if gotOk != tc.wantOk {
+				t.Fatalf("ok=%v want %v (dur=%v)", gotOk, tc.wantOk, gotDur)
+			}
+			if !tc.wantOk {
+				if gotDur != 0 {
+					t.Fatalf("expected zero duration when !ok, got %v", gotDur)
+				}
+				return
+			}
+			if tc.wantSkew == 0 {
+				if gotDur != tc.wantDur {
+					t.Fatalf("dur=%v want %v", gotDur, tc.wantDur)
+				}
+				return
+			}
+			diff := gotDur - tc.wantDur
+			if diff < -tc.wantSkew || diff > tc.wantSkew {
+				t.Fatalf("dur=%v diverges from %v by more than %v", gotDur, tc.wantDur, tc.wantSkew)
+			}
+		})
+	}
+}
+
+func TestRetry_SourceLabel(t *testing.T) {
+	cases := []struct {
+		name    string
+		ra      time.Duration
+		outcome parseOutcome
+		wantSrc string
+	}{
+		{"absent", 0, outcomeAbsent, "jitter"},
+		{"numeric-positive", 5 * time.Second, outcomeNumeric, "retry_after"},
+		{"numeric-clamped-zero-stays-jitter", 0, outcomeNumeric, "jitter"},
+		{"date-future", 30 * time.Minute, outcomeDate, "retry_after"},
+		{"date-past-clamped", 0, outcomeDate, "jitter"},
+		{"unparseable", 0, outcomeUnparseable, "malformed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sourceLabel(tc.ra, tc.outcome)
+			if got != tc.wantSrc {
+				t.Fatalf("sourceLabel=%q want %q", got, tc.wantSrc)
+			}
+		})
+	}
+}
+
+func TestRetry_PreviewRawHeader(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"short-ascii", "abc", "abc"},
+		{"non-printable", "a\x00b\x7fc\nd", "a?b?c?d"},
+		{"truncates-at-32", strings.Repeat("x", 64), strings.Repeat("x", 32)},
+		{"high-byte", "\xffhello", "?hello"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := previewRawHeader(tc.in)
+			if got != tc.want {
+				t.Fatalf("previewRawHeader=%q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRetry_MalformedRetryAfter_LogsWarn drives a server that emits an
+// unparseable Retry-After header twice, then 200. The transport must:
+//   - emit retry_retry_after_unparseable at Warn,
+//   - label retry_sleep source as "malformed",
+//   - still complete the retry via the jitter sleep (not abort).
+func TestRetry_MalformedRetryAfter_LogsWarn(t *testing.T) {
+	var hits atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := hits.Add(1)
+		if n < 3 {
+			w.Header().Set("Retry-After", "definitely-not-a-date")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(s.Close)
+
+	var buf syncBuf
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	rt := mustNewTransport(t,
+		WithMaxAttempts(3),
+		WithBackoff(time.Millisecond, 5*time.Millisecond),
+		WithLogger(logger),
+	)
+	c := &http.Client{Transport: rt}
+
+	resp, err := c.Get(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200 after retries", resp.StatusCode)
+	}
+	if got := hits.Load(); got != 3 {
+		t.Fatalf("hits=%d, want 3", got)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "retry_retry_after_unparseable") {
+		t.Fatalf("expected retry_retry_after_unparseable event; got: %s", out)
+	}
+	if !strings.Contains(out, "raw=definitely-not-a-date") {
+		t.Fatalf("expected raw=definitely-not-a-date attribute; got: %s", out)
+	}
+	if !strings.Contains(out, "source=malformed") {
+		t.Fatalf("expected source=malformed on retry_sleep; got: %s", out)
 	}
 }
 

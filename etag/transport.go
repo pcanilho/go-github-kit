@@ -37,6 +37,8 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"github.com/pcanilho/go-github-kit/cond"
 )
 
 // Sentinel errors exported from NewTransport so callers can use errors.Is.
@@ -274,6 +276,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			TLS:           resp.TLS,
 		}
 		synth.Header.Set("Content-Length", strconv.Itoa(len(entry.Body)))
+		// cond cache-status signal: set after merge so a stale cached
+		// "miss" cannot override.
+		synth.Header.Set(cond.HeaderCacheStatus, "hit")
 		return synth, nil
 	}
 
@@ -332,6 +337,10 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return resp, nil
 		}
 		t.logEvent(ctx, "store", req.URL.Path, nil, resp)
+		// cond cache-status signal: wire-200 stored. Set on resp.Header
+		// AFTER cache.Add returns so the stored entry does not ingest
+		// the key.
+		resp.Header.Set(cond.HeaderCacheStatus, "miss")
 		return resp, nil
 	}
 

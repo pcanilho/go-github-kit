@@ -3,7 +3,7 @@
 // range-over-func iterator.
 //
 // The iterator runs on a caller-supplied *http.Client, so the configured
-// transport stack (Throttle, RateLimit, Retry, oauth2, ETag) applies per
+// transport stack (RateLimit, Throttle, Retry, oauth2, ETag) applies per
 // page with no extra wiring. Use ghkit.HTTPClient or any *http.Client
 // the caller already has.
 //

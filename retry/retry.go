@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -17,11 +18,15 @@ import (
 	"time"
 )
 
-var (
-	ErrInvalidMaxAttempts = errors.New("retry: maxAttempts must be in [1, 100]")
-	ErrInvalidBackoff     = errors.New("retry: backoff requires 1ms <= minDelay <= maxDelay <= 1h")
-	ErrBodyNotRewindable  = errors.New("retry: cannot retry request with non-nil Body and nil GetBody")
-)
+// ErrInvalidMaxAttempts is returned when WithMaxAttempts is out of range.
+var ErrInvalidMaxAttempts = errors.New("retry: maxAttempts must be in [1, 100]")
+
+// ErrInvalidBackoff is returned when WithBackoff bounds are invalid.
+var ErrInvalidBackoff = errors.New("retry: backoff requires 1ms <= minDelay <= maxDelay <= 1h")
+
+// ErrBodyNotRewindable is joined with the prior error when a retry
+// attempt is needed for a body-bearing request with no GetBody.
+var ErrBodyNotRewindable = errors.New("retry: cannot retry request with non-nil Body and nil GetBody")
 
 // ErrRetryAfterExceedsMax is returned when a server's Retry-After header
 // exceeds the operator-configured maxDelay. When this error is returned,
@@ -227,7 +232,17 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	for attempt := 0; attempt < t.maxAttempts; attempt++ {
 		if attempt > 0 {
-			raOverride := parseRetryAfter(resp)
+			raOverride, outcome := parseRetryAfter(resp)
+
+			if outcome == outcomeUnparseable {
+				raw := ""
+				if resp != nil {
+					raw = previewRawHeader(resp.Header.Get("Retry-After"))
+				}
+				t.logEvent(ctx, slog.LevelWarn, "retry_retry_after_unparseable",
+					"attempt", attempt,
+					"raw", raw)
+			}
 
 			if raOverride > t.maxDelay {
 				if resp != nil {
@@ -256,7 +271,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			t.logEvent(ctx, slog.LevelDebug, "retry_sleep",
 				"attempt", attempt,
 				"sleep_ms", sleep.Milliseconds(),
-				"source", retryAfterOrJitter(raOverride))
+				"source", sourceLabel(raOverride, outcome))
 
 			timer := time.NewTimer(sleep)
 			select {
@@ -365,41 +380,94 @@ func (t *Transport) computeJitter(prev time.Duration) time.Duration {
 	return min(t.maxDelay, t.minDelay+n)
 }
 
-func parseRetryAfter(resp *http.Response) time.Duration {
-	if resp == nil {
-		return 0
+// RetryAfter parses a response's Retry-After header per RFC 9110 §10.2.3
+// and reports whether it should be honored as a sleep override. Returns
+// (0, false) for absent, unparseable, OR negative-numeric values; returns
+// the duration plus true otherwise. Used by sibling packages that want to
+// honor server hints without duplicating the parser.
+func RetryAfter(resp *http.Response) (time.Duration, bool) {
+	d, outcome := parseRetryAfter(resp)
+	if outcome != outcomeNumeric && outcome != outcomeDate {
+		return 0, false
 	}
-	h := resp.Header.Get("Retry-After")
-	if h == "" {
-		return 0
+	if d <= 0 {
+		return 0, false
 	}
-	if secs, err := strconv.Atoi(h); err == nil {
-		if secs < 0 {
-			return 0
-		}
-		if secs == 0 {
-			return time.Nanosecond
-		}
-		return time.Duration(secs) * time.Second
-	}
-	if target, err := http.ParseTime(h); err == nil {
-		d := time.Until(target)
-		if d < 0 {
-			return 0
-		}
-		if d == 0 {
-			return time.Nanosecond
-		}
-		return d
-	}
-	return 0
+	return d, true
 }
 
-func retryAfterOrJitter(ra time.Duration) string {
-	if ra > 0 {
-		return "retry_after"
+// parseOutcome lets the retry_sleep source label split "no override" from
+// "upstream sent an off-spec value". Both yield duration 0 today.
+type parseOutcome int
+
+const (
+	outcomeAbsent parseOutcome = iota
+	outcomeNumeric
+	outcomeDate
+	outcomeUnparseable
+)
+
+// parseRetryAfter follows RFC 9110 §10.2.3 (delta-seconds or HTTP-date).
+// RFC 3339 / ISO 8601 is not in the spec and is not accepted.
+func parseRetryAfter(resp *http.Response) (time.Duration, parseOutcome) {
+	if resp == nil {
+		return 0, outcomeAbsent
 	}
-	return "jitter"
+	h := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if h == "" {
+		return 0, outcomeAbsent
+	}
+	if secs, err := strconv.Atoi(h); err == nil {
+		switch {
+		case secs < 0:
+			return 0, outcomeNumeric
+		case secs == 0:
+			return time.Nanosecond, outcomeNumeric
+		case int64(secs) > int64(math.MaxInt64)/int64(time.Second):
+			// Saturate above maxDelayCeiling so the abort path trips
+			// instead of int64-ns multiplication wrapping silently.
+			return maxDelayCeiling + time.Hour, outcomeNumeric
+		}
+		return time.Duration(secs) * time.Second, outcomeNumeric
+	}
+	if target, err := http.ParseTime(h); err == nil {
+		switch d := time.Until(target); {
+		case d < 0:
+			return 0, outcomeDate
+		case d == 0:
+			return time.Nanosecond, outcomeDate
+		default:
+			return d, outcomeDate
+		}
+	}
+	return 0, outcomeUnparseable
+}
+
+func sourceLabel(raOverride time.Duration, outcome parseOutcome) string {
+	switch {
+	case raOverride > 0:
+		return "retry_after"
+	case outcome == outcomeUnparseable:
+		return "malformed"
+	default:
+		return "jitter"
+	}
+}
+
+// previewRawHeader bounds slog payload size and prevents log-line injection
+// from a hostile upstream Retry-After value.
+func previewRawHeader(s string) string {
+	const maxBytes = 32
+	if len(s) > maxBytes {
+		s = s[:maxBytes]
+	}
+	b := []byte(s)
+	for i, c := range b {
+		if c < 0x20 || c >= 0x7f {
+			b[i] = '?'
+		}
+	}
+	return string(b)
 }
 
 func classifyStopReason(req *http.Request, resp *http.Response, err error) string {

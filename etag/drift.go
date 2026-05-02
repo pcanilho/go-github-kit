@@ -1,12 +1,11 @@
-// Package etag [drift.go] implements transparent ETag drift detection and
-// fallback. Precompute mode is the default; if the client-side hash diverges
+// drift.go implements transparent ETag drift detection and fallback.
+// Precompute mode is the default; if the client-side hash diverges
 // from the server-issued ETag on driftThreshold validations inside
 // driftWindow, the Transport silently switches to passive mode (sends the
 // server's stored ETag verbatim). After driftCooldown, sampled probe-back
 // requests retry precompute; consecutive successes restore the precompute
 // path. State transitions are observable via WithDriftDetected and the
 // read-only Stats() snapshot.
-
 package etag
 
 import (

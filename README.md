@@ -4,6 +4,7 @@ A small Go toolkit that wraps [`github.com/google/go-github`](https://github.com
 
 [![CI](https://github.com/pcanilho/go-github-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/pcanilho/go-github-kit/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/pcanilho/go-github-kit.svg)](https://pkg.go.dev/github.com/pcanilho/go-github-kit)
+[![Go Report Card](https://goreportcard.com/badge/github.com/pcanilho/go-github-kit)](https://goreportcard.com/report/github.com/pcanilho/go-github-kit)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Why?
@@ -164,6 +165,135 @@ fmt.Printf("total: %d\n", n)
 `pages.As[T]` decodes each page into `[]T` and yields one element at a time; the iterator owns the response body. `pages.Pages` is the lower-level form that yields `*http.Response` per page when the caller wants to handle decoding directly.
 
 For tests, `ghtest.LinkHeader(baseURL, page, perPage, lastPage)` builds RFC 8288 Link header values. See [`examples/list-all-repos/`](examples/list-all-repos/main.go) for a runnable end-to-end demo.
+</details>
+
+<details>
+<summary><b>Polling a long-running operation (workflow run, check run, deployment)</b></summary>
+
+The `polling` sub-package iterates an HTTP endpoint on a caller-tunable interval, reusing the configured `*http.Client` so retry, etag, ratelimit, throttle, and oauth2 apply per attempt. `polling.As[T]` decodes each response into `T`; `WithDoneT` stops on the decoded value; `WithMaxWallClock` caps total time and wraps `context.DeadlineExceeded`.
+
+```go
+import (
+    "context"
+    "errors"
+    "log"
+    "net/http"
+    "os"
+    "time"
+
+    "github.com/google/go-github/v85/github"
+    ghkit "github.com/pcanilho/go-github-kit"
+    "github.com/pcanilho/go-github-kit/polling"
+    "github.com/pcanilho/go-github-kit/retry"
+)
+
+hc, err := ghkit.HTTPClient(
+    ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
+    ghkit.WithRetry(retry.WithMaxAttempts(1)), // polling owns the loop
+    ghkit.WithETagCache(),
+)
+if err != nil { panic(err) }
+
+ctx, cancel := context.WithTimeout(context.Background(), 35*time.Minute)
+defer cancel()
+
+url := "https://api.github.com/repos/owner/repo/actions/runs/12345"
+seq := polling.As[*github.WorkflowRun](
+    ctx, hc, http.MethodGet, url,
+    http.Header{"Accept": []string{"application/vnd.github+json"}},
+    nil, 15*time.Second,
+    polling.WithDoneT(func(r *github.WorkflowRun) bool { return r.GetStatus() == "completed" }),
+    polling.WithMaxWallClock(30*time.Minute),
+    polling.WithJitter(0.2),
+)
+
+var run *github.WorkflowRun
+for r, err := range seq {
+    if err != nil {
+        if errors.Is(err, polling.ErrMaxWallClockExceeded) { log.Fatal("budget exceeded") }
+        log.Fatal(err)
+    }
+    run = r
+}
+log.Printf("conclusion=%s", run.GetConclusion())
+```
+
+Sharp edges: each `c.Do` may itself loop through `retry.Transport` (pass `retry.WithMaxAttempts(1)` when polling owns the outer loop); `throttle.WithRequestsPerSecond` below `1/interval` dominates cadence; with `WithETagCache` an unchanged resource yields identical decoded bytes per tick (pair with `polling.WithChangeOnly` to skip those silently). Pages-shape body ownership: `Poll` yields `*http.Response` and the caller closes; `As[T]` owns and closes via defer.
+
+See [`examples/poll-workflow-run/`](examples/poll-workflow-run/main.go) for a runnable demo.
+</details>
+
+<details>
+<summary><b>Searching with envelope pagination (1000-cap aware)</b></summary>
+
+GitHub's `/search/*` endpoints return an envelope (`{total_count, incomplete_results, items[]}`), so `pages.As[T]` cannot serve them directly. The `search` sub-package wraps the four common endpoints (`Issues`, `Code`, `Repos`, `Users`) and surfaces both `IncompleteResults` (timed-out queries) and the post-page-10 1000-result hard cap as `ErrResultCapHit`.
+
+```go
+import (
+    "context"
+    "errors"
+    "fmt"
+
+    "github.com/google/go-github/v85/github"
+    "github.com/pcanilho/go-github-kit/search"
+)
+
+for r, err := range search.Issues[*github.Issue](
+    context.Background(), hc, "is:open is:pr author:torvalds",
+    search.WithPerPage(100),
+    search.WithSort("updated"),
+    search.WithOrder("desc"),
+) {
+    if err != nil {
+        if errors.Is(err, search.ErrResultCapHit) {
+            // Refine the query with a `created:<...` date filter.
+            break
+        }
+        panic(err)
+    }
+    if r.IncompleteResults {
+        // GitHub timed out server-side on this page; results may be partial.
+    }
+    fmt.Printf("[%d] %s\n", r.TotalCount, r.Item.GetHTMLURL())
+}
+```
+
+Implementation reuses `pages.Pages` for Link-header walking, so per-page retry/etag/ratelimit/throttle composition is automatic. Search has its own `X-RateLimit-Resource` budget; gofri routes requests transparently. See [`examples/search-issues/`](examples/search-issues/main.go).
+</details>
+
+<details>
+<summary><b>Detecting unchanged resources (visible 304)</b></summary>
+
+The `etag` layer transparently converts 304 responses into synthesised 200s with the cached body. The `cond` sub-package surfaces the change-vs-unchanged signal that is otherwise erased, letting consumers skip JSON parse, structural diff, DB writes, and webhook fan-out when nothing changed.
+
+```go
+import (
+    "context"
+    "encoding/json"
+    "io"
+    "net/http"
+
+    "github.com/google/go-github/v85/github"
+    "github.com/pcanilho/go-github-kit/cond"
+)
+
+req, _ := http.NewRequest(http.MethodGet, "https://api.github.com/repos/google/go-github", nil)
+req.Header.Set("Accept", "application/vnd.github+json")
+
+repo, status, err := cond.Fetch(context.Background(), hc, req,
+    func(r io.Reader) (*github.Repository, error) {
+        var v github.Repository
+        return &v, json.NewDecoder(r).Decode(&v)
+    },
+)
+if err != nil { panic(err) }
+switch status {
+case cond.Updated:    // wire 200 (or no etag layer in chain)
+case cond.Unchanged:  // synth 200 from cache hit; resource hasn't changed
+}
+```
+
+Mechanics: the etag layer sets `cond.HeaderCacheStatus` (`"X-Ghkit-Cache"`) on synth-200 (`"hit"`) and wire-200-store (`"miss"`) paths. `cond.StatusOf(resp)` reads the header. Absent header → `Updated` (no etag layer in chain → caller behaves as if every response is fresh). Pair with `polling.WithChangeOnly` to silently skip yields when polling an unchanged resource. See [`examples/conditional-fetch/`](examples/conditional-fetch/main.go).
 </details>
 
 <details>
