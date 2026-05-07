@@ -749,8 +749,6 @@ func TestETag_LogHygiene(t *testing.T) {
 }
 
 func TestETag_LogHygiene_DriftEvents(t *testing.T) {
-	// Asserts the log hygiene contract holds for the drift events
-	// (etag_drift_detected, etag_drift_recovered, drift_callback_panic).
 	rt, err := NewTransport(nil)
 	if err != nil {
 		t.Fatalf("NewTransport: %v", err)
@@ -760,23 +758,14 @@ func TestETag_LogHygiene_DriftEvents(t *testing.T) {
 	var buf bytes.Buffer
 	tr.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	// Trip drift.
 	for range driftThreshold {
 		if evt, fire := tr.recordMismatch(); fire {
 			tr.fireDriftEvent(context.Background(), evt)
 		}
 	}
-	// Recover via direct successes after backdated cooldown.
 	tr.driftDegradedAt.Store(time.Now().Add(-2 * driftCooldown).UnixNano())
 	for range driftRecoverAfterN {
 		if evt, fire := tr.recordSuccess(); fire {
-			tr.fireDriftEvent(context.Background(), evt)
-		}
-	}
-	// Force a callback panic to also exercise the drift_callback_panic path.
-	tr.driftCallback = func(DriftEvent) { panic("boom") }
-	for range driftThreshold {
-		if evt, fire := tr.recordMismatch(); fire {
 			tr.fireDriftEvent(context.Background(), evt)
 		}
 	}
@@ -784,9 +773,6 @@ func TestETag_LogHygiene_DriftEvents(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "etag_drift_detected") || !strings.Contains(out, "etag_drift_recovered") {
 		t.Fatalf("expected drift events in log; got %q", out)
-	}
-	if !strings.Contains(out, "drift_callback_panic") {
-		t.Fatalf("expected drift_callback_panic event in log; got %q", out)
 	}
 	banned := []string{"auth_len=", "ours_prefix=", "theirs_prefix=", "Authorization=", "Cookie=", "Set-Cookie="}
 	for _, b := range banned {

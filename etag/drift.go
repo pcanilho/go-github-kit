@@ -4,8 +4,9 @@
 // driftWindow, the Transport silently switches to passive mode (sends the
 // server's stored ETag verbatim). After driftCooldown, sampled probe-back
 // requests retry precompute; consecutive successes restore the precompute
-// path. State transitions are observable via WithDriftDetected and the
-// read-only Stats() snapshot.
+// path. Drift transitions surface as KindDriftDetected / KindDriftRecovered
+// events on WithEventCallback; the read-only Stats() snapshot also exposes
+// live drift state plus per-Outcome counters.
 package etag
 
 import (
@@ -53,11 +54,28 @@ type DriftEvent struct {
 }
 
 // Stats is the read-only snapshot returned by (*Transport).Stats. Suitable
-// for /healthz probes, Prometheus gauges, or polling dashboards.
+// for /healthz probes, Prometheus gauges, or polling dashboards. The four
+// Total* per-Outcome counters added in v1.6.0 are populated lock-free
+// from atomic counters; suitable for hit-rate metrics without enabling
+// DEBUG-level slog ingestion. {Degraded, DegradedAt} remain mutex-guarded
+// for snapshot consistency under concurrent transitions.
 type Stats struct {
 	Degraded        bool
 	DegradedAt      time.Time // zero when not degraded
 	TotalMismatches int64     // monotonic over Transport lifetime
+
+	// TotalHits counts cache lookups that matched (transport.go:218 site).
+	TotalHits int64
+	// TotalMisses counts cache lookups that missed (transport.go:231 site).
+	TotalMisses int64
+	// TotalStores counts wire-200 entries written to cache. Includes
+	// re-validated stores: a 200 whose ETag matched precompute also
+	// reaches cache.Add, so this is "stores that succeeded against the
+	// cache backend", not "stores of new entries".
+	TotalStores int64
+	// TotalBypasses aggregates uncached pass-throughs: bypass_oversize,
+	// bypass_noncacheable, and the two no_etag_header sites.
+	TotalBypasses int64
 }
 
 // Stats returns a snapshot of the Transport's drift detector state. Safe to
@@ -75,6 +93,10 @@ func (t *Transport) Stats() Stats {
 	s := Stats{
 		Degraded:        degraded,
 		TotalMismatches: t.driftTotalMismatch.Load(),
+		TotalHits:       t.totalHits.Load(),
+		TotalMisses:     t.totalMisses.Load(),
+		TotalStores:     t.totalStores.Load(),
+		TotalBypasses:   t.totalBypasses.Load(),
 	}
 	if degraded && at != 0 {
 		s.DegradedAt = time.Unix(0, at)
@@ -139,30 +161,18 @@ func (t *Transport) recordSuccess() (DriftEvent, bool) {
 	return DriftEvent{}, false
 }
 
-// fireDriftEvent emits the slog signal and invokes the user callback under
-// a recover guard. Detection is Warn; recovery is Info. ctx is forwarded to
-// the slog handler so a context-aware Handler can stamp request IDs.
 func (t *Transport) fireDriftEvent(ctx context.Context, evt DriftEvent) {
 	if evt.Recovered {
 		t.logger.InfoContext(ctx, "etag_drift_recovered",
 			"kind", "etag_drift_recovered",
 			"recovered", true,
 		)
+		t.emit(ctx, Event{Kind: KindDriftRecovered, DriftEvent: evt})
 	} else {
 		t.logger.WarnContext(ctx, "etag_drift_detected",
 			"kind", "etag_drift_detected",
 			"recovered", false,
 		)
+		t.emit(ctx, Event{Kind: KindDriftDetected, DriftEvent: evt})
 	}
-	if t.driftCallback == nil {
-		return
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			t.logger.ErrorContext(ctx, "drift_callback_panic",
-				"kind", "drift_callback_panic",
-			)
-		}
-	}()
-	t.driftCallback(evt)
 }

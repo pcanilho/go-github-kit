@@ -67,9 +67,12 @@ func TestDrift_ThresholdTripsAndFiresCallbackOnce(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var calls int
 		var lastEvt DriftEvent
-		tr := newDriftTransport(t, WithDriftDetected(func(e DriftEvent) {
+		tr := newDriftTransport(t, WithEventCallback(func(_ context.Context, evt Event) {
+			if evt.Kind != KindDriftDetected && evt.Kind != KindDriftRecovered {
+				return
+			}
 			calls++
-			lastEvt = e
+			lastEvt = evt.DriftEvent
 		}))
 
 		for range driftThreshold {
@@ -127,8 +130,10 @@ func TestDrift_StatsTotalMismatchesMonotonic(t *testing.T) {
 func TestDrift_RecoversAfterProbesPostCooldown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var events []DriftEvent
-		tr := newDriftTransport(t, WithDriftDetected(func(e DriftEvent) {
-			events = append(events, e)
+		tr := newDriftTransport(t, WithEventCallback(func(_ context.Context, evt Event) {
+			if evt.Kind == KindDriftDetected || evt.Kind == KindDriftRecovered {
+				events = append(events, evt.DriftEvent)
+			}
 		}))
 
 		for range driftThreshold {
@@ -336,22 +341,25 @@ func TestDrift_MismatchUnderDegradedStillCachesEntry(t *testing.T) {
 	}
 }
 
-func TestDrift_CallbackPanicDoesNotKillTransport(t *testing.T) {
-	tr := newDriftTransport(t, WithDriftDetected(func(e DriftEvent) {
-		panic("boom")
+func TestDrift_CallbackPanicPropagates(t *testing.T) {
+	tr := newDriftTransport(t, WithEventCallback(func(_ context.Context, evt Event) {
+		if evt.Kind == KindDriftDetected {
+			panic("boom")
+		}
 	}))
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("expected panic from callback to propagate; got none")
+		}
+		if !tr.Stats().Degraded {
+			t.Fatalf("expected degraded after threshold despite panic")
+		}
+	}()
 	for range driftThreshold {
 		tripMismatch(tr)
 	}
-	// If recover guard works, this point is reached. Stats remain consistent.
-	if !tr.Stats().Degraded {
-		t.Fatalf("expected degraded after threshold")
-	}
-	// Subsequent calls must still work.
-	tripMismatch(tr)
-	if got := tr.Stats().TotalMismatches; got <= driftThreshold {
-		t.Fatalf("TotalMismatches did not advance after panic: %d", got)
-	}
+	t.Fatalf("expected panic before this line")
 }
 
 func TestDrift_ConcurrentRecordMismatchRaceFree(t *testing.T) {
@@ -404,10 +412,11 @@ func TestDrift_RecoveryClearsMismatchCounter(t *testing.T) {
 // lifetime.
 func TestDrift_MultiCycleFiresEachTransition(t *testing.T) {
 	var detected, recovered int
-	tr := newDriftTransport(t, WithDriftDetected(func(e DriftEvent) {
-		if e.Recovered {
+	tr := newDriftTransport(t, WithEventCallback(func(_ context.Context, evt Event) {
+		switch evt.Kind { //nolint:exhaustive // intentional: only drift transitions matter for this test
+		case KindDriftRecovered:
 			recovered++
-		} else {
+		case KindDriftDetected:
 			detected++
 		}
 	}))
@@ -517,9 +526,12 @@ func TestDrift_EndToEndFallback(t *testing.T) {
 
 	var events []DriftEvent
 	var mu sync.Mutex
-	c := newTestClient(t, WithDriftDetected(func(e DriftEvent) {
+	c := newTestClient(t, WithEventCallback(func(_ context.Context, evt Event) {
+		if evt.Kind != KindDriftDetected && evt.Kind != KindDriftRecovered {
+			return
+		}
 		mu.Lock()
-		events = append(events, e)
+		events = append(events, evt.DriftEvent)
 		mu.Unlock()
 	}))
 

@@ -2,6 +2,7 @@ package etag
 
 import (
 	"cmp"
+	"context"
 	"log/slog"
 	"net/http"
 )
@@ -24,7 +25,7 @@ type config struct {
 	maxBodyBytes  int
 	maxCacheCap   int64
 	logger        *slog.Logger
-	driftCallback func(DriftEvent)
+	eventCallback func(context.Context, Event)
 }
 
 // defaultPerEntryCap is the per-entry response body cap when WithMaxBodyBytes
@@ -125,18 +126,18 @@ func WithLogger(l *slog.Logger) Option {
 	return optionFunc(func(cfg *config) { cfg.logger = l })
 }
 
-// WithDriftDetected registers a callback fired on each drift state
-// transition: Recovered=false on detection, Recovered=true on probe-back
-// recovery. Without this option the transport still detects drift and
-// degrades transparently; only the user-visible signal is omitted.
+// WithEventCallback registers a callback fired for every cache decision,
+// validation outcome, store/invalidation, and drift transition. Drift
+// transitions arrive as KindDriftDetected / KindDriftRecovered events
+// with the full DriftEvent payload on evt.DriftEvent.
 //
-// The callback runs synchronously inside RoundTrip; keep it fast and
-// non-blocking. Panics are contained by a recover guard so a misbehaving
-// callback cannot crash the transport.
-func WithDriftDetected(cb func(DriftEvent)) Option {
+// The callback runs synchronously inside RoundTrip and may be invoked
+// concurrently from many goroutines. It must be fast, non-blocking, and
+// panic-free; panics propagate up through RoundTrip.
+func WithEventCallback(cb func(ctx context.Context, evt Event)) Option {
 	return optionFunc(func(cfg *config) {
 		if cb != nil {
-			cfg.driftCallback = cb
+			cfg.eventCallback = cb
 		}
 	})
 }
