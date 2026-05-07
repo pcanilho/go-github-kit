@@ -5,6 +5,67 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-05-07
+
+Adds two complementary observability surfaces to `etag.Transport` and
+removes the single-purpose `WithDriftDetected` callback (BREAKING). Drift
+transitions are now delivered via the unified `WithEventCallback` hook
+as `KindDriftDetected` / `KindDriftRecovered` events; the full
+`DriftEvent` payload remains available on `evt.DriftEvent`.
+
+### Added
+
+- `etag.Stats` gains four per-Outcome counters: `TotalHits`,
+  `TotalMisses`, `TotalStores`, `TotalBypasses`. All atomic, monotonic
+  over the Transport's lifetime, read via `Stats()` without taking the
+  driftMu mutex (the existing brief lock for `{Degraded, DegradedAt}`
+  consistency is unchanged). Lets consumers compute hit-rate /
+  store-rate / bypass-rate by polling `Stats()` at any cadence, without
+  bumping the slog handler to `LevelDebug` to scrape `etag_event` records
+  on the hot path. `TotalBypasses` aggregates all four uncached
+  pass-through paths (`bypass_oversize`, `bypass_noncacheable`, both
+  `no_etag_header` sites). Rare error and invalidation outcomes
+  (`get_error`, `store_error`, `remove_error`, `invalidated_gone`) remain
+  observable via slog at INFO/WARN level.
+- `etag.WithEventCallback(cb func(ctx context.Context, evt etag.Event))`
+  for per-call attribution. The callback fires on every cache decision,
+  validation outcome, store/invalidation, and drift transition with the
+  request URL, normalised path template, and Kind-specific fields.
+- `etag.Event` struct and `etag.Kind` type with 14 constants matching
+  the existing slog `kind` attribute values. Drift kinds drop the
+  `etag_` prefix that the slog kind attributes carry, for naming
+  consistency with the bare `etag_event` kinds.
+
+### Removed (BREAKING)
+
+- `etag.WithDriftDetected(cb func(DriftEvent)) Option`. Use
+  `etag.WithEventCallback(cb)` and filter on
+  `evt.Kind == etag.KindDriftDetected || evt.Kind == etag.KindDriftRecovered`.
+  The full `DriftEvent` payload remains on `evt.DriftEvent`. See
+  MIGRATION.md "v1.6: per-call event attribution" for a copy-paste swap.
+- Slog event `drift_callback_panic`. The previous version used a
+  `recover()` guard around the drift callback; v1.6 does not catch
+  panics from `WithEventCallback`, so the corresponding slog event no
+  longer fires. Panics propagate up through `RoundTrip`.
+
+### Documentation
+
+- `MIGRATION.md` gains a "v1.6: per-call event attribution" recipe
+  showing `WithEventCallback` ctx propagation, repo extraction from
+  `Event.URL`, and the per-page callback fan-out under the `pages`
+  package.
+- `README.md` line 503 now references `Stats`'s per-Outcome counters
+  and the `WithEventCallback` hook.
+- `PROPOSALS.md` updates the observability-roadmap row to mark
+  per-call event callbacks as Implemented.
+- Godoc on the `Transport` type (`etag/transport.go:90-91`) and on
+  the `Stats` struct (`etag/drift.go:55-56`) updated to reference
+  the new surfaces.
+- Slog event allowlist comment at `etag/transport.go:3-18` updated:
+  `drift_callback_panic` removed (the recover guard is gone).
+- `etag/drift.go:1-9` package prologue updated: drift transitions are
+  observable via `WithEventCallback`.
+
 ## [1.5.0] - 2026-05-02
 
 Adds three consumer-utility sub-packages that ride on top of the
@@ -580,6 +641,7 @@ and rotating PATs alike.
 - `golang.org/x/oauth2` v0.36.0
 - `golang.org/x/time` v0.15.0
 
+[1.6.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.6.0
 [1.5.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.5.0
 [1.4.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.4.0
 [1.3.1]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.3.1

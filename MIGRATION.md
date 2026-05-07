@@ -11,7 +11,7 @@ If your repo already has a hand-rolled stack of `oauth2.Transport`, `go-github-r
 
 ## What the swap changes
 
-- **Drift safety hatch is automatic, not a flag**. If your repo today exposes a runtime flag like `--enable-precomputed-etag=false` to fall back to passive mode under drift, you can retire it. ghkit detects drift on every cacheable 200 and silently switches to passive mode after 10 mismatches in a 60-second window; after a 1-hour cooldown it probes back to precompute and recovers if the algorithm is working again. Wire `etag.WithDriftDetected(...)` for state-transition callbacks if you want an alert; poll `(*etag.Transport).Stats()` for live state on `/healthz`.
+- **Drift safety hatch is automatic, not a flag**. If your repo today exposes a runtime flag like `--enable-precomputed-etag=false` to fall back to passive mode under drift, you can retire it. ghkit detects drift on every cacheable 200 and silently switches to passive mode after 10 mismatches in a 60-second window; after a 1-hour cooldown it probes back to precompute and recovers if the algorithm is working again. Wire `etag.WithEventCallback(...)` and filter on `KindDriftDetected`/`KindDriftRecovered` for transition alerts; poll `(*etag.Transport).Stats()` for live state on `/healthz`. As of v1.6.0, `Stats` also carries `TotalHits`/`TotalMisses`/`TotalStores`/`TotalBypasses` so a polling adapter can publish per-Outcome counters without scraping DEBUG-level slog records.
 - **Stricter cache-policy gate**. ghkit's etag transport refuses to cache responses carrying `Cache-Control: no-store` or `Vary: *` (RFC 9111 alignment). GitHub does not currently emit either, so the practical effect is zero, but the behavior is stricter than a typical in-tree port.
 - **Log/metric label fidelity**. ghkit's etag transport emits a small built-in slog event set with a generic path-template allowlist. Your repo's bespoke route table (`/repos/{o}/{r}/commits/{sha}/branches-where-head` and similar) collapses to a coarse fallback label. If your dashboards key on per-route labels, keep emitting metrics from your own RoundTripper above ghkit's transport; do not rely on ghkit's slog event labels for app-specific path cardinality.
 - **Upstream features ghkit does not curate**. The named `ratelimit.With*` options cover the common callbacks; for upstream features ghkit does not expose (the abort callback on `WithTotalSleepLimit`, custom limit providers, before-request hooks), use `ratelimit.WithUpstreamOptions(opts ...any)` to forward raw `gofri/go-github-ratelimit/v2` options.
@@ -263,3 +263,82 @@ existing consumers ignore it. The exported `retry.RetryAfter` is a
 new symbol consumed internally by `polling`; consumers can use it for
 their own Retry-After parsing without depending on the unexported
 `parseOutcome` enum.
+
+## v1.6: per-call event attribution
+
+`etag.WithDriftDetected` is removed in v1.6.0. The unified
+`etag.WithEventCallback` hook delivers every cache decision and
+validation event with the request URL, normalised path template, and
+Kind-specific fields. Use it when you need to attribute outcomes to a
+specific GitHub URI, repository, or consumer-side context (e.g., the
+webhook event type that triggered the API call).
+
+### Before (v1.5)
+
+```go
+tr, err := etag.NewTransport(base,
+    etag.WithCache(cache),
+    etag.WithDriftDetected(func(evt etag.DriftEvent) {
+        if evt.Recovered {
+            metrics.RecordDriftRecovered(evt.DetectedAt)
+        } else {
+            metrics.RecordDriftDetected(evt.DetectedAt)
+        }
+    }),
+)
+```
+
+### After (v1.6)
+
+```go
+type webhookCtxKey struct{}
+
+func handleWebhook(w http.ResponseWriter, r *http.Request) {
+    evtType := r.Header.Get("X-GitHub-Event")
+    ctx := context.WithValue(r.Context(), webhookCtxKey{}, evtType)
+    // ... call gh.Repositories.Get(ctx, owner, repo) etc.
+}
+
+func emitMetric(ctx context.Context, evt etag.Event) {
+    webhookType, _ := ctx.Value(webhookCtxKey{}).(string)
+    repo := ""
+    if evt.URL != nil { // nil on KindDriftDetected / KindDriftRecovered
+        parts := strings.Split(strings.TrimPrefix(evt.URL.Path, "/"), "/")
+        if len(parts) >= 3 && parts[0] == "repos" {
+            repo = parts[1] + "/" + parts[2]
+        }
+    }
+    switch evt.Kind {
+    case etag.KindDriftDetected:
+        metrics.RecordDriftDetected(evt.DriftEvent.DetectedAt)
+    case etag.KindDriftRecovered:
+        metrics.RecordDriftRecovered(evt.DriftEvent.DetectedAt)
+    default:
+        metrics.Inc("github_etag", "kind", string(evt.Kind),
+            "webhook_type", webhookType, "repo", repo,
+            "path_template", evt.PathTemplate)
+    }
+}
+
+tr, _ := etag.NewTransport(base,
+    etag.WithCache(cache),
+    etag.WithEventCallback(emitMetric),
+)
+```
+
+The drift-transition payload is unchanged: `evt.DriftEvent.DetectedAt`
+and `evt.DriftEvent.Recovered` carry the same values as the v1.5
+callback argument. New consumers pick up cache hit/miss/store/mismatch
+metrics for free by handling additional `Kind` values.
+
+The callback runs synchronously inside `RoundTrip`. Panics propagate up;
+the library does not catch them. For dashboards that only need totals,
+prefer `Stats()` polling: its per-Outcome counters are read lock-free
+and require no per-event allocation.
+
+**Pages composition.** With the `pages` package (`pages.As[T]`,
+`pages.Pages`), every page is a separate `RoundTrip`, so the callback
+fires once per page in a paginated traversal, not once per logical
+fetch. A 30-page list issuing 30 conditional GETs produces 30 callback
+invocations. Aggregate in your handler if your metric backend wants
+one event per logical fetch.

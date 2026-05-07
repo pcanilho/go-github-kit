@@ -12,7 +12,6 @@
 //   - "etag_mismatch" (warn):         {kind, path_template, status, body_len, vary_names, github_request_id}
 //   - "etag_drift_detected" (warn):   {kind, recovered=false}
 //   - "etag_drift_recovered" (info):  {kind, recovered=true}
-//   - "drift_callback_panic" (error): {kind}
 //
 // github_request_id is the upstream X-GitHub-Request-Id response header: a
 // public, opaque, GitHub-issued correlator. Not a credential. Safe to log.
@@ -87,8 +86,9 @@ var (
 // requests retry precompute; consecutive successes restore precompute mode
 // automatically. Passive mode never replays caller credentials in
 // If-None-Match: only the server's previously issued opaque ETag is sent.
-// Use WithDriftDetected for state-transition callbacks; use Stats() to
-// read live state.
+// Use WithEventCallback for per-call lifecycle events (cache decisions,
+// validation, store, drift transitions). Stats() exposes the four atomic
+// per-Outcome counters and the drift-state pair.
 type Transport struct {
 	base        http.RoundTripper
 	cache       Cache
@@ -113,7 +113,12 @@ type Transport struct {
 	driftTotalMismatch atomic.Int64
 	driftProbeCounter  atomic.Int64
 
-	driftCallback func(DriftEvent)
+	totalHits     atomic.Int64
+	totalMisses   atomic.Int64
+	totalStores   atomic.Int64
+	totalBypasses atomic.Int64
+
+	eventCallback func(context.Context, Event)
 }
 
 // NewTransport returns a Transport wrapping base. When base is nil, a cloned
@@ -170,7 +175,7 @@ func NewTransport(base http.RoundTripper, opts ...Option) (http.RoundTripper, er
 		maxBody:          cfg.maxBodyBytes,
 		logger:           cfg.logger,
 		driftWindowStart: time.Now(),
-		driftCallback:    cfg.driftCallback,
+		eventCallback:    cfg.eventCallback,
 	}, nil
 }
 
@@ -201,6 +206,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return t.base.RoundTrip(req)
 	}
 
+	// origURL captured before req = reqCopy below so emits report the
+	// caller's URL on every path. tmpl shared with warnMismatch and the
+	// emit calls; logEvent recomputes for slog-internal reasons.
+	origURL := req.URL
+	tmpl := normalisePath(origURL.Path)
+
 	ctx := req.Context()
 	digest, err := t.resolveScope(req)
 	if err != nil {
@@ -212,10 +223,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// Backend-side error (e.g. Redis network blip). Treat as a miss
 		// and log; never fail the request on a cache-read failure.
 		t.logEvent(ctx, "get_error", req.URL.Path, nil, nil)
+		t.emit(ctx, Event{Kind: KindGetError, URL: origURL, PathTemplate: tmpl, Err: getErr})
 		haveEntry = false
 	}
 	if haveEntry {
 		t.logEvent(ctx, "hit", req.URL.Path, &entry, nil)
+		t.totalHits.Add(1)
+		t.emit(ctx, Event{Kind: KindHit, URL: origURL, PathTemplate: tmpl, Age: hitAge(entry)})
 		// Clone the request before mutating headers: the http.RoundTripper
 		// contract forbids modifying the caller's request, and wrappers above
 		// (rate-limit, retry) may reuse the original.
@@ -229,6 +243,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		req = reqCopy
 	} else {
 		t.logEvent(ctx, "miss", req.URL.Path, nil, nil)
+		t.totalMisses.Add(1)
+		t.emit(ctx, Event{Kind: KindMiss, URL: origURL, PathTemplate: tmpl})
 	}
 
 	resp, err := t.base.RoundTrip(req)
@@ -290,16 +306,31 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		if oversize {
 			t.logEvent(ctx, "bypass_oversize", req.URL.Path, nil, resp)
+			t.totalBypasses.Add(1)
+			t.emit(ctx, Event{
+				Kind: KindBypassOversize, URL: origURL, PathTemplate: tmpl,
+				Status: resp.StatusCode, GitHubRequestID: resp.Header.Get("X-GitHub-Request-Id"),
+			})
 			return resp, nil
 		}
 		if !cacheableResponse(resp) {
 			t.logEvent(ctx, "bypass_noncacheable", req.URL.Path, nil, resp)
+			t.totalBypasses.Add(1)
+			t.emit(ctx, Event{
+				Kind: KindBypassNoncache, URL: origURL, PathTemplate: tmpl,
+				Status: resp.StatusCode, GitHubRequestID: resp.Header.Get("X-GitHub-Request-Id"),
+			})
 			return resp, nil
 		}
 
 		serverETag := resp.Header.Get("ETag")
 		if serverETag == "" {
 			t.logEvent(ctx, "no_etag_header", req.URL.Path, nil, resp)
+			t.totalBypasses.Add(1)
+			t.emit(ctx, Event{
+				Kind: KindNoEtagHeader, URL: origURL, PathTemplate: tmpl,
+				Status: resp.StatusCode, GitHubRequestID: resp.Header.Get("X-GitHub-Request-Id"),
+			})
 			return resp, nil
 		}
 
@@ -309,16 +340,28 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		ok, _, _, skipped := t.validate(req, resp, body)
 		if skipped {
 			t.logEvent(ctx, "no_etag_header", req.URL.Path, nil, resp)
+			t.totalBypasses.Add(1)
+			t.emit(ctx, Event{
+				Kind: KindNoEtagHeader, URL: origURL, PathTemplate: tmpl,
+				Status: resp.StatusCode, GitHubRequestID: resp.Header.Get("X-GitHub-Request-Id"),
+			})
 			return resp, nil
 		}
 		if ok {
 			t.logEvent(ctx, "validated_ok", req.URL.Path, nil, resp)
+			t.emit(ctx, Event{
+				Kind: KindValidatedOK, URL: origURL, PathTemplate: tmpl,
+				Status: resp.StatusCode, GitHubRequestID: resp.Header.Get("X-GitHub-Request-Id"),
+			})
 			if evt, fire := t.recordSuccess(); fire {
 				t.fireDriftEvent(ctx, evt)
 			}
 		} else {
-			tmpl := normalisePath(req.URL.Path)
 			t.warnMismatch(ctx, resp, body, tmpl)
+			t.emit(ctx, Event{
+				Kind: KindMismatch, URL: origURL, PathTemplate: tmpl,
+				Status: resp.StatusCode, GitHubRequestID: resp.Header.Get("X-GitHub-Request-Id"),
+			})
 			if evt, fire := t.recordMismatch(); fire {
 				t.fireDriftEvent(ctx, evt)
 			}
@@ -333,10 +376,21 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			// Cache-store errors are observability-only: the HTTP request
 			// already succeeded, the caller gets the 200 unchanged.
 			t.logEvent(ctx, "store_error", req.URL.Path, nil, resp)
+			t.emit(ctx, Event{
+				Kind: KindStoreError, URL: origURL, PathTemplate: tmpl,
+				Status: resp.StatusCode, Err: addErr,
+				GitHubRequestID: resp.Header.Get("X-GitHub-Request-Id"),
+			})
 			//nolint:nilerr // intentional: Add failure does not fail the HTTP request
 			return resp, nil
 		}
 		t.logEvent(ctx, "store", req.URL.Path, nil, resp)
+		t.totalStores.Add(1)
+		t.emit(ctx, Event{
+			Kind: KindStore, URL: origURL, PathTemplate: tmpl,
+			Status: resp.StatusCode, BodyLen: len(body),
+			GitHubRequestID: resp.Header.Get("X-GitHub-Request-Id"),
+		})
 		// cond cache-status signal: wire-200 stored. Set on resp.Header
 		// AFTER cache.Add returns so the stored entry does not ingest
 		// the key.
@@ -349,8 +403,17 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if haveEntry && (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone) {
 		if rmErr := t.cache.Remove(ctx, key); rmErr != nil {
 			t.logEvent(ctx, "remove_error", req.URL.Path, nil, resp)
+			t.emit(ctx, Event{
+				Kind: KindRemoveError, URL: origURL, PathTemplate: tmpl,
+				Status: resp.StatusCode, Err: rmErr,
+				GitHubRequestID: resp.Header.Get("X-GitHub-Request-Id"),
+			})
 		} else {
 			t.logEvent(ctx, "invalidated_gone", req.URL.Path, nil, resp)
+			t.emit(ctx, Event{
+				Kind: KindInvalidatedGone, URL: origURL, PathTemplate: tmpl,
+				Status: resp.StatusCode, GitHubRequestID: resp.Header.Get("X-GitHub-Request-Id"),
+			})
 		}
 	}
 
@@ -439,6 +502,13 @@ func (t *Transport) allowLog(key string) bool {
 	return lim.(*rate.Limiter).Allow()
 }
 
+func (t *Transport) emit(ctx context.Context, evt Event) {
+	if t.eventCallback == nil {
+		return
+	}
+	t.eventCallback(ctx, evt)
+}
+
 // cacheKey is the URL plus the per-Transport scope digest. Fragments are
 // stripped because they are never sent over the wire.
 func cacheKey(u *url.URL, scopeDigest string) string {
@@ -464,6 +534,15 @@ func (t *Transport) resolveScope(req *http.Request) (string, error) {
 	}
 	sum := sha256.Sum256([]byte(scope))
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// hitAge returns time.Since(entry.StoredAt), or 0 when StoredAt is
+// unset (custom Cache impls per cache.go are allowed to leave it zero).
+func hitAge(entry Entry) time.Duration {
+	if entry.StoredAt.IsZero() {
+		return 0
+	}
+	return time.Since(entry.StoredAt)
 }
 
 // readBounded reads up to maxBody+1 bytes. Returns (body, false, nil) on
