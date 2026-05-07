@@ -466,6 +466,62 @@ POST/PATCH retries with a body require `req.GetBody`; `http.NewRequest` only set
 </details>
 
 <details>
+<summary><b>Wiring metrics to etag and ratelimit callbacks</b></summary>
+
+ghkit imports no metrics library; counters attach to `etag.WithEventCallback` and the named ratelimit callbacks.
+
+```go
+import (
+    "context"
+    "fmt"
+    "net/http"
+    "time"
+
+    "github.com/prometheus/client_golang/prometheus"
+    "github.com/pcanilho/go-github-kit/etag"
+    "github.com/pcanilho/go-github-kit/ratelimit"
+)
+
+var (
+    cacheEvents = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "ghkit_etag_events_total"},     []string{"kind"})
+    reqs        = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "ghkit_requests_total"},        []string{"status_class", "from_cache"})
+    mismatches  = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "ghkit_etag_mismatches_total"}, []string{"path_template"})
+    rl          = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "ghkit_ratelimit_total"},       []string{"kind", "category"})
+)
+
+func transport(scope string) (http.RoundTripper, error) {
+    etagRT, err := etag.NewTransport(nil,
+        etag.WithKeyScope(scope),
+        etag.WithEventCallback(func(_ context.Context, ev etag.Event) {
+            cacheEvents.WithLabelValues(string(ev.Kind)).Inc()
+            if ev.Status > 0 {
+                fromCache := ev.Kind == etag.KindHit || ev.Kind == etag.KindValidatedOK
+                reqs.WithLabelValues(fmt.Sprintf("%dxx", ev.Status/100), fmt.Sprint(fromCache)).Inc()
+            }
+            if ev.Kind == etag.KindMismatch {
+                mismatches.WithLabelValues(ev.PathTemplate).Inc()
+            }
+        }),
+    )
+    if err != nil {
+        return nil, err
+    }
+    return ratelimit.NewTransport(etagRT,
+        ratelimit.WithTotalSleepLimit(time.Hour),
+        ratelimit.WithPrimaryLimitDetected(func(ev *ratelimit.PrimaryEvent) {
+            rl.WithLabelValues("primary", string(ev.Category)).Inc()
+        }),
+        ratelimit.WithSecondaryLimitDetected(func(*ratelimit.SecondaryEvent) {
+            rl.WithLabelValues("secondary", "").Inc()
+        }),
+    ), nil
+}
+```
+
+Metric names are illustrative; substitute your registry conventions.
+</details>
+
+<details>
 <summary><b>Use only the etag sub-package in a hand-built stack</b></summary>
 
 ```go
