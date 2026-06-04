@@ -1,6 +1,6 @@
 module github.com/pcanilho/go-github-kit
 
-go 1.26.2
+go 1.26.4
 
 require (
 	github.com/gofri/go-github-ratelimit/v2 v2.0.2

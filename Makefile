@@ -39,9 +39,9 @@ lint:
 	golangci-lint run
 
 vuln:
-	# CI pins govulncheck via golang/govulncheck-action (Dependabot-tracked).
-	# This target is a local-dev fallback; it pulls whatever @latest is today.
-	# If you want a deterministic run locally, pin a specific version here.
+	# Mirrors the CI govulncheck job, which runs golang.org/x/vuln @latest
+	# directly. This is the local-dev equivalent; it pulls whatever @latest
+	# is today. Pin a specific version here for a deterministic local run.
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 tidy:

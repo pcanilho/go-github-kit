@@ -1,6 +1,6 @@
 module github.com/pcanilho/go-github-kit/examples
 
-go 1.26.2
+go 1.26.4
 
 require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.18.0
