@@ -5,6 +5,23 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-06-04
+
+Maintenance release. Bumps the Go toolchain to 1.26.4 and refreshes CI
+tooling and pinned action versions. No library source or public API
+changes since 1.6.0.
+
+### Changed
+
+- Go toolchain bumped to 1.26.4 (`go.mod`).
+- CI `govulncheck` step refactored.
+- Pinned GitHub Actions bumped: `actions/checkout`,
+  `golangci/golangci-lint-action`, `codecov/codecov-action`.
+
+### Documentation
+
+- Added a `WithEventCallback` usage example.
+
 ## [1.6.0] - 2026-05-07
 
 Adds two complementary observability surfaces to `etag.Transport` and
