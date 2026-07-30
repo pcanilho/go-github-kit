@@ -46,6 +46,27 @@ func main() {
 		log.Fatalf("ghkit.HTTPClient: %v", err)
 	}
 
+	run, err := waitForRun(hc, owner, repo, runID)
+	if err != nil {
+		if errors.Is(err, polling.ErrMaxWallClockExceeded) {
+			fmt.Fprintln(os.Stderr, "workflow did not finish within budget")
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "poll: %v\n", err)
+		os.Exit(1)
+	}
+	if run == nil {
+		log.Fatal("no responses observed")
+	}
+	fmt.Printf("run %d: status=%s conclusion=%s\n",
+		run.GetID(), run.GetStatus(), run.GetConclusion())
+}
+
+// waitForRun polls the run until it reports status="completed", the
+// wall-clock budget expires, or the request fails. The context lives in
+// this function so its cancel runs on return, ahead of any os.Exit in
+// main.
+func waitForRun(hc *http.Client, owner, repo string, runID int64) (*github.WorkflowRun, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%d",
 		owner, repo, runID)
 	headers := http.Header{
@@ -67,26 +88,11 @@ func main() {
 	)
 
 	var run *github.WorkflowRun
-	var iterErr error
 	for r, err := range seq {
 		if err != nil {
-			iterErr = err
-			break
+			return nil, err
 		}
 		run = r
 	}
-	cancel()
-	if iterErr != nil {
-		if errors.Is(iterErr, polling.ErrMaxWallClockExceeded) {
-			fmt.Fprintln(os.Stderr, "workflow did not finish within budget")
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "poll: %v\n", iterErr)
-		os.Exit(1)
-	}
-	if run == nil {
-		log.Fatal("no responses observed")
-	}
-	fmt.Printf("run %d: status=%s conclusion=%s\n",
-		run.GetID(), run.GetStatus(), run.GetConclusion())
+	return run, nil
 }

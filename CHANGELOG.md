@@ -5,6 +5,31 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-07-30
+
+Maintenance release. Bumps the Go toolchain to 1.26.5 to pick up the
+`crypto/tls` fix for GO-2026-5856, and restructures one example to satisfy
+a lint check. No library source or public API changes since 1.6.1.
+
+### Security
+
+- Go toolchain bumped to 1.26.5, resolving GO-2026-5856 (Encrypted Client
+  Hello privacy leak in `crypto/tls`), reported by `govulncheck` against the
+  standard library. No library code was affected; the vulnerability is in the
+  toolchain's stdlib.
+
+### Changed
+
+- Go toolchain bumped to 1.26.5 (`go.mod`, `examples/go.mod`).
+
+### Examples
+
+- `examples/poll-workflow-run/`: the polling loop and its context move
+  into a `waitForRun` helper, so the deferred `cancel` runs on return
+  rather than being skipped by `os.Exit` in `main` (gocritic
+  `exitAfterDefer`). Exit codes and the `ErrMaxWallClockExceeded` branch
+  are unchanged.
+
 ## [1.6.1] - 2026-06-04
 
 Maintenance release. Bumps the Go toolchain to 1.26.4 and refreshes CI
@@ -658,6 +683,8 @@ and rotating PATs alike.
 - `golang.org/x/oauth2` v0.36.0
 - `golang.org/x/time` v0.15.0
 
+[1.6.2]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.6.2
+[1.6.1]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.6.1
 [1.6.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.6.0
 [1.5.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.5.0
 [1.4.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.4.0
