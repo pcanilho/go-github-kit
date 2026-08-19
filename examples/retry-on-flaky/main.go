@@ -11,13 +11,15 @@ import (
 	"os"
 	"time"
 
-	"github.com/google/go-github/v85/github"
+	"github.com/google/go-github/v90/github"
 	ghkit "github.com/pcanilho/go-github-kit"
 	"github.com/pcanilho/go-github-kit/retry"
 )
 
 func main() {
-	gh, err := ghkit.New(github.NewClient,
+	gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
+		return github.NewClient(github.WithHTTPClient(hc))
+	},
 		ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
 		ghkit.WithRetry(
 			retry.WithMaxAttempts(5),
@@ -40,7 +42,7 @@ func main() {
 		),
 	)
 	if err != nil {
-		log.Fatalf("ghkit.New: %v", err)
+		log.Fatalf("ghkit.NewE: %v", err)
 	}
 
 	repo, _, err := gh.Repositories.Get(context.Background(), "google", "go-github")

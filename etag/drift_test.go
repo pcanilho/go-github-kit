@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -27,13 +26,15 @@ func tripSuccess(tr *Transport) {
 	}
 }
 
-func mustParseURL(t *testing.T, raw string) *url.URL {
+// mustGetRequest builds the GET that cacheKey derives a key from. It
+// carries no variant headers, matching what doGet issues.
+func mustGetRequest(t *testing.T, raw string) *http.Request {
 	t.Helper()
-	u, err := url.Parse(raw)
+	req, err := http.NewRequest(http.MethodGet, raw, nil)
 	if err != nil {
-		t.Fatalf("url.Parse(%q): %v", raw, err)
+		t.Fatalf("http.NewRequest(%q): %v", raw, err)
 	}
-	return u
+	return req
 }
 
 // newDriftTransport returns the concrete *Transport so unit tests can call
@@ -329,7 +330,7 @@ func TestDrift_MismatchUnderDegradedStillCachesEntry(t *testing.T) {
 	// First request: cache cold, server returns garbage ETag, validation
 	// fails. Cache must still take the entry.
 	_ = doGet(t, c, s.URL+"/repos/a/b").StatusCode
-	cached, ok, err := tr.cache.Get(t.Context(), cacheKey(mustParseURL(t, s.URL+"/repos/a/b"), tr.scopeDigest))
+	cached, ok, err := tr.cache.Get(t.Context(), cacheKey(mustGetRequest(t, s.URL+"/repos/a/b"), tr.scopeDigest))
 	if err != nil {
 		t.Fatalf("cache.Get: %v", err)
 	}

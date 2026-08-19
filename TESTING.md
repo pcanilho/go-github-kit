@@ -1,10 +1,16 @@
 # Testing code that uses ghkit
 
-The `ghtest` sub-package ships two helpers for the GitHub-specific traps in
-testing ghkit-using code: secondary-rate-limit classification
-(`WriteSecondaryLimit`) and the bored-engineer ETag hash domain
-(`Write304IfMatch`). Everything else is plain stdlib code, shown inline as
-recipes you can copy.
+The `ghtest` sub-package ships four helpers for the GitHub-specific traps in
+testing ghkit-using code:
+
+| Helper | What it covers |
+|---|---|
+| `WriteSecondaryLimit` | 403 plus `Retry-After` and the `documentation_url` suffix go-github classifies on |
+| `Write304IfMatch` | The bored-engineer ETag hash domain, comma-splitting `If-None-Match` correctly |
+| `ETagServer` | A whole `httptest.Server` that computes ETags and synthesises 304s, so you do not hand-roll the handler |
+| `LinkHeader` | RFC 8288 `Link` headers for pagination fixtures |
+
+Everything else is plain stdlib code, shown inline as recipes you can copy.
 
 `ghtest` is shape-correct, not behaviour-correct. It does not enforce
 rate-limit budgets or run a real ETag database. For behaviour fidelity,
@@ -12,8 +18,8 @@ run integration tests against `api.github.com` with a throwaway token.
 
 ## Routing a ghkit-built client at a test server
 
-go-github's `*Client` has a `BaseURL` field. Point it at the test server
-URL and every request the SDK builds is sent there instead of
+Pass the test server URL to `github.WithURLs` at construction and every
+request the SDK builds is sent there instead of
 api.github.com.
 
 ```go
@@ -22,10 +28,9 @@ package myservice_test
 import (
     "net/http"
     "net/http/httptest"
-    "net/url"
     "testing"
 
-    "github.com/google/go-github/v85/github"
+    "github.com/google/go-github/v90/github"
     ghkit "github.com/pcanilho/go-github-kit"
 )
 
@@ -37,9 +42,9 @@ func TestRouting(t *testing.T) {
 
     hc, err := ghkit.HTTPClient(ghkit.WithToken("test"))
     if err != nil { t.Fatal(err) }
-    gh := github.NewClient(hc)
-    base, _ := url.Parse(srv.URL + "/")
-    gh.BaseURL = base // trailing slash required; go-github appends API paths
+    base := srv.URL + "/"
+    gh, err := github.NewClient(github.WithHTTPClient(hc), github.WithURLs(&base, nil))
+    if err != nil { t.Fatal(err) }
     _ = gh
 }
 ```
@@ -52,10 +57,9 @@ package myservice_test
 import (
     "net/http"
     "net/http/httptest"
-    "net/url"
     "testing"
 
-    "github.com/google/go-github/v85/github"
+    "github.com/google/go-github/v90/github"
     ghkit "github.com/pcanilho/go-github-kit"
     "github.com/pcanilho/go-github-kit/etag"
     "github.com/pcanilho/go-github-kit/ghtest"
@@ -76,9 +80,9 @@ func TestETag304(t *testing.T) {
     defer srv.Close()
 
     hc, _ := ghkit.HTTPClient(ghkit.WithToken("test"), ghkit.WithETagCache())
-    gh := github.NewClient(hc)
-    base, _ := url.Parse(srv.URL + "/")
-    gh.BaseURL = base
+    base := srv.URL + "/"
+    gh, err := github.NewClient(github.WithHTTPClient(hc), github.WithURLs(&base, nil))
+    if err != nil { t.Fatal(err) }
     _ = gh
     // drive your service: first call primes the cache, second call sees 304
 }

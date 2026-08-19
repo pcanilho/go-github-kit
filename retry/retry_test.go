@@ -694,11 +694,11 @@ func TestRetry_SourceLabel(t *testing.T) {
 		outcome parseOutcome
 		wantSrc string
 	}{
-		{"absent", 0, outcomeAbsent, "jitter"},
+		{"absent", 0, outcomeAbsent, sourceJitter},
 		{"numeric-positive", 5 * time.Second, outcomeNumeric, "retry_after"},
-		{"numeric-clamped-zero-stays-jitter", 0, outcomeNumeric, "jitter"},
+		{"numeric-clamped-zero-stays-jitter", 0, outcomeNumeric, sourceJitter},
 		{"date-future", 30 * time.Minute, outcomeDate, "retry_after"},
-		{"date-past-clamped", 0, outcomeDate, "jitter"},
+		{"date-past-clamped", 0, outcomeDate, sourceJitter},
 		{"unparseable", 0, outcomeUnparseable, "malformed"},
 	}
 	for _, tc := range cases {

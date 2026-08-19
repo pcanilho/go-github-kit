@@ -36,8 +36,8 @@ func envelopeServer(t *testing.T, totalPages, perPage int, incomplete bool) *htt
 			w.Header().Set("Link", link)
 		}
 		startID := (page - 1) * perPage
-		var items []string
-		for i := 0; i < perPage; i++ {
+		items := make([]string, 0, perPage)
+		for i := range perPage {
 			items = append(items, fmt.Sprintf(`{"id":%d,"title":"i-%d"}`, startID+i, startID+i))
 		}
 		incFlag := "false"

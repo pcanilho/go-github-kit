@@ -20,7 +20,8 @@
 // closed by the caller's prior normal-yield iteration (per Poll's
 // body-ownership contract). lastResp may be nil if WithChangeOnly
 // suppressed every yield. ErrMaxWallClockExceeded wraps
-// context.DeadlineExceeded.
+// context.DeadlineExceeded. ErrNilClient is returned when the supplied
+// *http.Client is nil.
 //
 // Sharp edges:
 //
@@ -35,8 +36,10 @@
 //     next inner round-trip, not synchronously.
 //
 // Determinism: production uses time.NewTimer + select-on-ctx. Tests
-// inject WithSleepFunc / WithNowFunc. Jitter is a deterministic
-// mid-point clamp; not applied when honoring Retry-After.
+// inject WithSleepFunc / WithNowFunc. Two jitter modes: WithJitter is a
+// deterministic mid-point offset, WithFullJitter samples uniformly so
+// concurrent pollers de-correlate. The last of the two applied wins.
+// Neither applies when honoring Retry-After.
 //
 // Body argument: the body []byte passed to Poll/As is not deep-copied;
 // the iterator constructs a fresh bytes.NewReader(body) per attempt

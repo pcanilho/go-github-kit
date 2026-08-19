@@ -20,7 +20,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/google/go-github/v85/github"
+	"github.com/google/go-github/v90/github"
 	ghkit "github.com/pcanilho/go-github-kit"
 	"github.com/pcanilho/go-github-kit/polling"
 	"github.com/pcanilho/go-github-kit/retry"

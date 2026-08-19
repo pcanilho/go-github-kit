@@ -16,6 +16,7 @@ const (
 	KindMiss            Kind = "miss"
 	KindBypassOversize  Kind = "bypass_oversize"
 	KindBypassNoncache  Kind = "bypass_noncacheable"
+	KindBypassEmptyBody Kind = "bypass_empty_body"
 	KindNoEtagHeader    Kind = "no_etag_header"
 	KindValidatedOK     Kind = "validated_ok"
 	KindMismatch        Kind = "mismatch"

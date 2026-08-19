@@ -28,7 +28,30 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fuzz-corpus
+          name: fuzz-corpus-etag
           path: etag/testdata/fuzz/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  fuzz-retry-after:
+    name: Fuzz Retry-After parser
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      # -fuzz takes one target, hence a separate job.
+      - name: Run fuzz for 10 minutes
+        id: fuzz
+        run: go test -fuzz=FuzzParseRetryAfter -fuzztime=10m ./retry/...
+      - name: Upload crash corpus
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-corpus-retry
+          path: retry/testdata/fuzz/
           if-no-files-found: ignore
           retention-days: 30

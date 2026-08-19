@@ -1,10 +1,12 @@
 module github.com/pcanilho/go-github-kit/examples
 
-go 1.26.5
+go 1.26
+
+toolchain go1.26.6
 
 require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
-	github.com/google/go-github/v85 v85.0.0
+	github.com/google/go-github/v90 v90.0.0
 	github.com/pcanilho/go-github-kit v1.0.0
 	github.com/shurcooL/githubv4 v0.0.0-20260209031235-2402fdf4a9ed
 	golang.org/x/oauth2 v0.36.0

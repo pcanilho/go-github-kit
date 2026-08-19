@@ -11,14 +11,14 @@ If your repo already has a hand-rolled stack of `oauth2.Transport`, `go-github-r
 
 ## What the swap changes
 
-- **Drift safety hatch is automatic, not a flag**. If your repo today exposes a runtime flag like `--enable-precomputed-etag=false` to fall back to passive mode under drift, you can retire it. ghkit detects drift on every cacheable 200 and silently switches to passive mode after 10 mismatches in a 60-second window; after a 1-hour cooldown it probes back to precompute and recovers if the algorithm is working again. Wire `etag.WithEventCallback(...)` and filter on `KindDriftDetected`/`KindDriftRecovered` for transition alerts; poll `(*etag.Transport).Stats()` for live state on `/healthz`. As of v1.6.0, `Stats` also carries `TotalHits`/`TotalMisses`/`TotalStores`/`TotalBypasses` so a polling adapter can publish per-Outcome counters without scraping DEBUG-level slog records.
+- **Drift safety hatch is automatic, not a flag**. If your repo today exposes a runtime flag like `--enable-precomputed-etag=false` to fall back to passive mode under drift, you can retire it. ghkit detects drift on every cacheable 200 and silently switches to passive mode after 10 mismatches in a 60-second window; after a 1-hour cooldown it probes back to precompute and recovers if the algorithm is working again. Wire `etag.WithEventCallback(...)` and filter on `KindDriftDetected`/`KindDriftRecovered` for transition alerts; obtain the transport with `ghkit.WithETagTransport(func(tr *etag.Transport) { ... })` and poll its `Stats()` for live state on `/healthz`. As of v1.6.0, `Stats` also carries `TotalHits`/`TotalMisses`/`TotalStores`/`TotalBypasses` so a polling adapter can publish per-Outcome counters without scraping DEBUG-level slog records.
 - **Stricter cache-policy gate**. ghkit's etag transport refuses to cache responses carrying `Cache-Control: no-store` or `Vary: *` (RFC 9111 alignment). GitHub does not currently emit either, so the practical effect is zero, but the behavior is stricter than a typical in-tree port.
 - **Log/metric label fidelity**. ghkit's etag transport emits a small built-in slog event set with a generic path-template allowlist. Your repo's bespoke route table (`/repos/{o}/{r}/commits/{sha}/branches-where-head` and similar) collapses to a coarse fallback label. If your dashboards key on per-route labels, keep emitting metrics from your own RoundTripper above ghkit's transport; do not rely on ghkit's slog event labels for app-specific path cardinality.
 - **Upstream features ghkit does not curate**. The named `ratelimit.With*` options cover the common callbacks; for upstream features ghkit does not expose (the abort callback on `WithTotalSleepLimit`, custom limit providers, before-request hooks), use `ratelimit.WithUpstreamOptions(opts ...any)` to forward raw `gofri/go-github-ratelimit/v2` options.
 
 ## Recipe 1: Kubernetes operator with rotating PAT
 
-Shape: a long-lived process holds one `*http.Client`. Each reconcile reads a fresh token from disk and clones a `*github.Client` on top of the shared transport with `(*github.Client).WithAuthToken(tok)`. The transport keeps the ETag cache and rate-limit bucket warm across reconciles.
+Shape: a long-lived process holds one `*http.Client`. Each reconcile reads a fresh token from disk and builds a `*github.Client` on top of the shared transport, passing the token as a construction option. The SDK copies the `*http.Client` it is given, so the shared transport is not mutated. The transport keeps the ETag cache and rate-limit bucket warm across reconciles.
 
 ### Before
 
@@ -60,7 +60,7 @@ import (
 hc, err := ghkit.HTTPClient(
     ghkit.WithETagCache(
         etag.WithCache(etag.NewLRUCache(flags.Controller.ETagCacheSize)),
-        etag.WithKeyScope(installationID),
+        etag.WithKeyScope(strconv.FormatInt(installationID, 10)),
     ),
     ghkit.WithRateLimit(
         ratelimit.WithPrimaryLimitDetected(func(c *ratelimit.PrimaryEvent) {
@@ -78,12 +78,17 @@ hc, err := ghkit.HTTPClient(
 if err != nil { return err }
 
 // Per reconcile -- new client, same transport:
-gh := github.NewClient(hc).WithAuthToken(readGitHubToken())
+gh, err := github.NewClient(
+    github.WithHTTPClient(hc),
+    github.WithAuthToken(readGitHubToken()),
+)
 ```
 
 What moves: the bespoke `etag_transport.go` and the manual `github_ratelimit.NewClient(...)` call collapse into options. Compression handling is implicit. The reconcile-loop call site is unchanged. `PrimaryEvent` / `SecondaryEvent` are type aliases of the upstream `gofri` types, so callback bodies do not need to change.
 
-If you are pinned to `go-github/v84` and ghkit is on `v85`, keep your major: ghkit does not import `go-github` from `HTTPClient()` -- it returns `*http.Client`, which you hand to your own go-github version.
+Keep whichever `go-github` major you are pinned to. ghkit does not import `go-github` at all, so no ghkit release can force you to bump it or rewrite import paths. `HTTPClient()` returns an `*http.Client` you hand to your own version.
+
+Note that the "before" snippet above uses the pre-v87 `github.NewClient(hc).WithAuthToken(...)` API. From v87 the constructor is `NewClient(opts ...ClientOptionsFunc) (*Client, error)`, as shown in the "after" snippet.
 
 ## Recipe 2: Multi-installation webhook processor
 
@@ -139,7 +144,7 @@ func (p *Processor) getGitHubClient(ctx context.Context, installationID int64) (
         ghkit.WithTimeout(5 * time.Second),
     )
     if err != nil { return nil, err }
-    return github.NewClient(hc), nil
+    return github.NewClient(github.WithHTTPClient(hc))
 }
 ```
 
@@ -187,12 +192,16 @@ func NewClient(token string, opts ...ETagOptions) (*Client, error) {
 
 ```go
 import (
+    "net/http"
+
     ghkit "github.com/pcanilho/go-github-kit"
     "github.com/pcanilho/go-github-kit/etag"
 )
 
 func NewClient(token string, etagSize int) (*github.Client, error) {
-    return ghkit.New(github.NewClient,
+    return ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
+        return github.NewClient(github.WithHTTPClient(hc))
+    },
         ghkit.WithToken(token),
         ghkit.WithETagCache(etag.WithCache(etag.NewLRUCache(etagSize))),
         ghkit.WithRequestsPerSecond(1.3, 1),

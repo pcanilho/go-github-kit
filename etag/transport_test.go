@@ -99,7 +99,7 @@ func TestETag_ColdMissStoresEtagThenSendsIfNoneMatch(t *testing.T) {
 	c := newTestClient(t)
 
 	// Cold miss.
-	resp, err := c.Get(s.URL + "/users/octocat")
+	resp, err := c.Get(s.URL + testPathOctocat)
 	if err != nil {
 		t.Fatalf("get 1: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestETag_ColdMissStoresEtagThenSendsIfNoneMatch(t *testing.T) {
 
 	// Warm request: server sees If-None-Match and returns 304, transport
 	// replays the cached body as a synthesised 200.
-	resp2, err := c.Get(s.URL + "/users/octocat")
+	resp2, err := c.Get(s.URL + testPathOctocat)
 	if err != nil {
 		t.Fatalf("get 2: %v", err)
 	}
@@ -157,8 +157,8 @@ func TestETag_TokenRotationSurvival(t *testing.T) {
 	s, reqs := ghServer(t, body)
 	c := newTestClient(t)
 
-	req1, _ := http.NewRequest("GET", s.URL+"/users/octocat", nil)
-	req1.Header.Set("Authorization", "token AAA")
+	req1, _ := http.NewRequest("GET", s.URL+testPathOctocat, nil)
+	req1.Header.Set(headerAuthorization, "token AAA")
 	r1, err := c.Do(req1)
 	if err != nil {
 		t.Fatalf("req1: %v", err)
@@ -168,8 +168,8 @@ func TestETag_TokenRotationSurvival(t *testing.T) {
 	// Rotate token mid-stream. Passive mode would miss on the server side
 	// (different auth -> different ETag). Precompute mode recomputes with
 	// the CURRENT Authorization and still gets a 304 that we replay.
-	req2, _ := http.NewRequest("GET", s.URL+"/users/octocat", nil)
-	req2.Header.Set("Authorization", "token BBB")
+	req2, _ := http.NewRequest("GET", s.URL+testPathOctocat, nil)
+	req2.Header.Set(headerAuthorization, "token BBB")
 	r2, err := c.Do(req2)
 	if err != nil {
 		t.Fatalf("req2: %v", err)
@@ -227,7 +227,7 @@ func TestETag_WeakETag(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	c := newTestClient(t, WithLogger(logger))
-	resp, _ := c.Get(s.URL + "/users/octocat")
+	resp, _ := c.Get(s.URL + testPathOctocat)
 	_ = resp.Body.Close()
 	if strings.Contains(buf.String(), "etag_mismatch") {
 		t.Fatalf("weak ETag should validate; got mismatch log: %q", buf.String())
@@ -395,7 +395,7 @@ func TestETag_WriteInvalidation_404(t *testing.T) {
 	c := newTestClient(t)
 
 	// Seed.
-	r1, err := c.Get(s.URL + "/users/octocat")
+	r1, err := c.Get(s.URL + testPathOctocat)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -403,7 +403,7 @@ func TestETag_WriteInvalidation_404(t *testing.T) {
 		t.Fatalf("seed body close: %v", err)
 	}
 	// 404 triggers invalidation.
-	r2, err := c.Get(s.URL + "/users/octocat")
+	r2, err := c.Get(s.URL + testPathOctocat)
 	if err != nil {
 		t.Fatalf("404 request: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestETag_WriteInvalidation_404(t *testing.T) {
 		t.Fatalf("404 body close: %v", err)
 	}
 	// Post-invalidation: should be a cold miss (no If-None-Match).
-	r3, err := c.Get(s.URL + "/users/octocat")
+	r3, err := c.Get(s.URL + testPathOctocat)
 	if err != nil {
 		t.Fatalf("post-invalidation: %v", err)
 	}
@@ -431,13 +431,13 @@ func TestETag_ConcurrentAccessSafe(t *testing.T) {
 	s, _ := ghServer(t, body)
 	c := newTestClient(t)
 	// Warm the cache first.
-	_ = doGet(t, c, s.URL+"/users/octocat")
+	_ = doGet(t, c, s.URL+testPathOctocat)
 
 	var wg sync.WaitGroup
 	for range 16 {
 		wg.Go(func() {
 			for range 20 {
-				r, err := c.Get(s.URL + "/users/octocat")
+				r, err := c.Get(s.URL + testPathOctocat)
 				if err != nil {
 					t.Errorf("get: %v", err)
 					return
@@ -456,7 +456,7 @@ func TestETag_MultiTenantIsolation(t *testing.T) {
 	// Server returns different bodies based on Authorization header.
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := bodyA
-		if strings.Contains(r.Header.Get("Authorization"), "B") {
+		if strings.Contains(r.Header.Get(headerAuthorization), "B") {
 			body = bodyB
 		}
 		expected := ComputeExpectedETag(r.Header, nil, body)
@@ -485,8 +485,8 @@ func TestETag_MultiTenantIsolation(t *testing.T) {
 	cB := &http.Client{Transport: rtB}
 
 	do := func(c *http.Client, tok string) []byte {
-		req, _ := http.NewRequest("GET", s.URL+"/users/octocat", nil)
-		req.Header.Set("Authorization", "token "+tok)
+		req, _ := http.NewRequest("GET", s.URL+testPathOctocat, nil)
+		req.Header.Set(headerAuthorization, "token "+tok)
 		r, err := c.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -789,7 +789,7 @@ func TestETag_AutoKeyScope_MultiTenantIsolation(t *testing.T) {
 	bodyB := []byte(`{"tenant":"B"}`)
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := bodyA
-		if strings.Contains(r.Header.Get("Authorization"), "B") {
+		if strings.Contains(r.Header.Get(headerAuthorization), "B") {
 			body = bodyB
 		}
 		expected := ComputeExpectedETag(r.Header, nil, body)
@@ -818,9 +818,9 @@ func TestETag_AutoKeyScope_MultiTenantIsolation(t *testing.T) {
 	c := &http.Client{Transport: rt}
 
 	do := func(tenant, tok string) []byte {
-		req, _ := http.NewRequest("GET", s.URL+"/users/octocat", nil)
+		req, _ := http.NewRequest("GET", s.URL+testPathOctocat, nil)
 		req = req.WithContext(context.WithValue(req.Context(), tenantKey{}, tenant))
-		req.Header.Set("Authorization", "token "+tok)
+		req.Header.Set(headerAuthorization, "token "+tok)
 		r, err := c.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -876,7 +876,7 @@ func TestETag_AutoKeyScope_EmptyScopeIsError(t *testing.T) {
 	}
 	c := &http.Client{Transport: rt}
 
-	resp, err := c.Get(s.URL + "/users/octocat")
+	resp, err := c.Get(s.URL + testPathOctocat)
 	if err == nil {
 		_ = resp.Body.Close()
 		t.Fatal("want error from c.Get; got nil")
@@ -899,7 +899,7 @@ func TestETag_AutoKeyScope_ErrorPropagates(t *testing.T) {
 	}
 	c := &http.Client{Transport: rt}
 
-	resp, err := c.Get(s.URL + "/users/octocat")
+	resp, err := c.Get(s.URL + testPathOctocat)
 	if err == nil {
 		_ = resp.Body.Close()
 		t.Fatal("want error from c.Get; got nil")

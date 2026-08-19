@@ -21,4 +21,5 @@
 // iteration after one yield. ErrInvalidLinkHeader is returned when the
 // response Link header is structurally malformed; a header with no
 // rel="next" is treated as a clean end of pagination, not an error.
+// ErrNilClient is returned when the supplied *http.Client is nil.
 package pages

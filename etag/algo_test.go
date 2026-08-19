@@ -8,7 +8,7 @@ import (
 )
 
 func TestETag_Hash_Deterministic(t *testing.T) {
-	h := http.Header{"Accept": {"application/vnd.github.v3+json"}, "Authorization": {"token abc"}}
+	h := http.Header{headerAccept: {"application/vnd.github.v3+json"}, headerAuthorization: {"token abc"}}
 	a := ComputeExpectedETag(h, nil, []byte("hello"))
 	b := ComputeExpectedETag(h, nil, []byte("hello"))
 	if a != b {
@@ -17,17 +17,17 @@ func TestETag_Hash_Deterministic(t *testing.T) {
 }
 
 func TestETag_Hash_VaryFallbackOnEmpty(t *testing.T) {
-	h := http.Header{"Accept": {"a"}, "Authorization": {"b"}, "Cookie": {"c"}}
+	h := http.Header{headerAccept: {"a"}, headerAuthorization: {"b"}, "Cookie": {"c"}}
 	withNil := ComputeExpectedETag(h, nil, []byte("body"))
-	withAll := ComputeExpectedETag(h, []string{"Accept", "Authorization", "Cookie"}, []byte("body"))
+	withAll := ComputeExpectedETag(h, []string{"Accept", headerAuthorization, "Cookie"}, []byte("body"))
 	if withNil != withAll {
 		t.Fatalf("nil vary should equal explicit full list; %q vs %q", withNil, withAll)
 	}
 }
 
 func TestETag_Hash_DifferentAuthProducesDifferentHash(t *testing.T) {
-	h1 := http.Header{"Authorization": {"token-1"}}
-	h2 := http.Header{"Authorization": {"token-2"}}
+	h1 := http.Header{headerAuthorization: {"token-1"}}
+	h2 := http.Header{headerAuthorization: {"token-2"}}
 	if ComputeExpectedETag(h1, nil, []byte("x")) == ComputeExpectedETag(h2, nil, []byte("x")) {
 		t.Fatal("different auth must produce different hash")
 	}
@@ -46,10 +46,10 @@ func TestETag_Hash_UnknownVaryHeaderWritesEmptyValue(t *testing.T) {
 
 func TestETag_NormaliseETag_StripsWeakAndQuotes(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{`"abc"`, "abc"},
-		{`W/"abc"`, "abc"},
-		{`abc`, "abc"},
-		{` W/"abc"`, "abc"}, // leading whitespace must be trimmed
+		{`"abc"`, testTokenABC},
+		{`W/"abc"`, testTokenABC},
+		{`abc`, testTokenABC},
+		{` W/"abc"`, testTokenABC}, // leading whitespace must be trimmed
 	}
 	for _, c := range cases {
 		if got := NormaliseETag(c.in); got != c.want {
@@ -63,7 +63,7 @@ func TestETag_ParseVary_OrdersAndDedups(t *testing.T) {
 	h.Add("Vary", "Accept, Authorization")
 	h.Add("Vary", "Cookie")
 	got := ParseVary(h)
-	want := []string{"Accept", "Authorization", "Cookie"}
+	want := []string{"Accept", headerAuthorization, "Cookie"}
 	if len(got) != len(want) {
 		t.Fatalf("ParseVary len = %d; want %d (%v)", len(got), len(want), got)
 	}
@@ -93,9 +93,9 @@ func TestETag_Cacheable(t *testing.T) {
 		header http.Header
 		want   bool
 	}{
-		{"GET cacheable", "GET", "/users/octocat", nil, true},
-		{"HEAD cacheable", "HEAD", "/users/octocat", nil, true},
-		{"POST not cacheable", "POST", "/users/octocat", nil, false},
+		{"GET cacheable", "GET", testPathOctocat, nil, true},
+		{"HEAD not cacheable", "HEAD", testPathOctocat, nil, false},
+		{"POST not cacheable", "POST", testPathOctocat, nil, false},
 		{"PUT not cacheable", "PUT", "/x", nil, false},
 		{"Range request not cacheable", "GET", "/x", http.Header{"Range": {"bytes=0-100"}}, false},
 		{"/rate_limit not cacheable", "GET", "/rate_limit", nil, false},
@@ -156,12 +156,12 @@ func TestETag_NormalisePath(t *testing.T) {
 		"/repos/google/go-github":                        "/repos/{o}/{r}",
 		"/repos/google/go-github/commits/abc1234567":     "/repos/{o}/{r}/commits/{sha}",
 		"/repos/google/go-github/compare/main...feature": "/repos/{o}/{r}/compare/{base...head}",
-		"/users/octocat":                                 "/users/{u}",
-		"/orgs/github":                                   "/orgs/{o}",
-		"/app/installations/12345":                       "/app/installations/{id}",
-		"/meta":                                          "/meta",
-		"/gists/1234":                                    "/gists/_", // unknown-route fallback
-		"/unmapped":                                      "unknown",
+		testPathOctocat:            "/users/{u}",
+		"/orgs/github":             "/orgs/{o}",
+		"/app/installations/12345": "/app/installations/{id}",
+		"/meta":                    "/meta",
+		"/gists/1234":              "/gists/_", // unknown-route fallback
+		"/unmapped":                "unknown",
 	}
 	for in, want := range cases {
 		if got := normalisePath(in); got != want {
@@ -174,7 +174,7 @@ func TestETag_NormalisePath(t *testing.T) {
 // that ComputeExpectedETag returns 64-char hex (SHA256). Byte equality
 // against the real server is gated by the -tags=live tests.
 func TestETag_ComputeExpectedETag_GoldenShape(t *testing.T) {
-	got := ComputeExpectedETag(http.Header{"Accept": {"application/json"}}, nil, []byte("hello"))
+	got := ComputeExpectedETag(http.Header{headerAccept: {"application/json"}}, nil, []byte("hello"))
 	if len(got) != 64 {
 		t.Fatalf("expected 64-char hex, got %d: %q", len(got), got)
 	}
@@ -183,3 +183,9 @@ func TestETag_ComputeExpectedETag_GoldenShape(t *testing.T) {
 		t.Fatalf("expected lowercase hex, got %q", got)
 	}
 }
+
+// Shared fixtures for the etag package tests.
+const (
+	testPathOctocat = "/users/octocat"
+	testTokenABC    = "abc"
+)

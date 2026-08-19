@@ -22,6 +22,7 @@ var (
 	ErrPreAuthedBaseWithAuth = errors.New("ghkit: WithBaseTransport with a non-*http.Transport base cannot be combined with WithToken or WithTokenSource")
 	ErrNonPositiveRPS        = errors.New("ghkit: WithRequestsPerSecond requires rps > 0 and burst >= 1")
 	ErrNilFactory            = errors.New("ghkit: New requires a non-nil factory function")
+	ErrETagTransportType     = errors.New("ghkit: WithETagTransport: constructed transport is not an *etag.Transport")
 )
 
 // HTTPClient builds an *http.Client with the configured transport stack.
@@ -53,6 +54,17 @@ func HTTPClient(opts ...Option) (*http.Client, error) {
 		inner, err := etag.NewTransport(rt, etagOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("ghkit: etag: %w", err)
+		}
+		// NewTransport returns http.RoundTripper; comma-ok keeps this
+		// correct if that ever changes.
+		if len(cfg.etagTransportFns) > 0 {
+			et, ok := inner.(*etag.Transport)
+			if !ok {
+				return nil, fmt.Errorf("%w: got %T", ErrETagTransportType, inner)
+			}
+			for _, fn := range cfg.etagTransportFns {
+				fn(et)
+			}
 		}
 		rt = inner
 	}
@@ -119,27 +131,18 @@ func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error
 // compile-time dependency on any specific GitHub SDK; pass whichever
 // constructor you use at the call site.
 //
-// Canonical usage:
+// Use New for constructors that cannot fail, which take the *http.Client
+// as their only argument:
 //
-//	import "github.com/google/go-github/v85/github"
+//	import "github.com/shurcooL/githubv4"
 //
-//	gh, err := ghkit.New(github.NewClient,
+//	v4, err := ghkit.New(githubv4.NewClient,
 //	    ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
-//	    ghkit.WithETagCache(),
 //	)
 //
-// Custom construction (UserAgent, GitHub Enterprise BaseURL, any other
-// post-construction tweaks) goes inside a factory closure:
-//
-//	gh, err := ghkit.New(func(hc *http.Client) *github.Client {
-//	    c := github.NewClient(hc)
-//	    c.UserAgent = "my-app/1.0"
-//	    return c
-//	}, opts...)
-//
-// For GitHub Enterprise, call github.NewClient(hc).WithEnterpriseURLs(base, upload)
-// inside the closure. The base URL must end with a trailing slash; go-github
-// returns an error if it does not.
+// go-github v87 changed NewClient to
+// `NewClient(opts ...ClientOptionsFunc) (*Client, error)`, so it no longer
+// binds here. Use NewE, or build the client in two steps with HTTPClient.
 //
 // When factory is nil, New returns the zero value of T and ErrNilFactory.
 // When HTTPClient returns an error (invalid option combination), New
@@ -154,6 +157,34 @@ func New[T any](factory func(*http.Client) T, opts ...Option) (T, error) {
 		return zero, err
 	}
 	return factory(hc), nil
+}
+
+// NewE is New for SDK constructors that return an error:
+//
+//	gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
+//	    return github.NewClient(github.WithHTTPClient(hc))
+//	}, ghkit.WithToken(tok))
+//
+// go-github v87+ is variadic over its own options, so the closure is needed
+// either way; NewE just gives the constructor's error somewhere to go. Use
+// New for constructors that cannot fail, such as githubv4.NewClient.
+//
+// Factory errors are wrapped as "ghkit: factory: %w". A nil factory returns
+// the zero value of T and ErrNilFactory.
+func NewE[T any](factory func(*http.Client) (T, error), opts ...Option) (T, error) {
+	var zero T
+	if factory == nil {
+		return zero, ErrNilFactory
+	}
+	hc, err := HTTPClient(opts...)
+	if err != nil {
+		return zero, err
+	}
+	v, err := factory(hc)
+	if err != nil {
+		return zero, fmt.Errorf("ghkit: factory: %w", err)
+	}
+	return v, nil
 }
 
 func validateConfig(c *config) error {

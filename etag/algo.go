@@ -10,11 +10,19 @@ import (
 	"strings"
 )
 
+// Header names in the ETag hash domain. headerAccept is also used by the
+// cache-key variant set (variantHeaders in transport.go).
+const (
+	headerAccept        = "Accept"
+	headerAuthorization = "Authorization"
+	headerCookie        = "Cookie"
+)
+
 // varyHeaders is the canonical list of response-Vary header names GitHub
 // participates in. Iteration order is part of the algorithm contract; do not
 // alphabetize or reorder. Unexported to prevent mutation of in-process state;
 // callers who need the list call VaryHeaders().
-var varyHeaders = []string{"Accept", "Authorization", "Cookie"}
+var varyHeaders = []string{headerAccept, headerAuthorization, headerCookie}
 
 // VaryHeaders returns an immutable copy of the canonical Vary header list.
 // Mutating the returned slice does not affect internal state.
@@ -95,8 +103,12 @@ func ParseVary(h http.Header) []string {
 // cacheable returns true for requests whose responses carry an ETag we can
 // revalidate against. The request-side checks run before we issue any call;
 // response-side checks (cacheableResponse) run after we read the response.
+//
+// GET only. A HEAD response carries no body (net/http sets http.NoBody), so
+// hashing it against the server's ETag mismatches every time and feeds the
+// drift detector false positives.
 func cacheable(req *http.Request) bool {
-	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+	if req.Method != http.MethodGet {
 		return false
 	}
 	if req.Header.Get("Range") != "" {

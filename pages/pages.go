@@ -17,6 +17,10 @@ import (
 // error.
 var ErrInvalidLinkHeader = errors.New("pages: malformed Link header")
 
+// ErrNilClient is returned by Pages and As when the supplied
+// *http.Client is nil.
+var ErrNilClient = errors.New("pages: nil *http.Client")
+
 // Pages iterates paginated HTTP responses by following the
 // Link: rel="next" header. The configured *http.Client carries the full
 // transport stack (RateLimit, Throttle, Retry, oauth2, ETag in
@@ -41,7 +45,7 @@ func Pages(
 ) iter.Seq2[*http.Response, error] {
 	return func(yield func(*http.Response, error) bool) {
 		if client == nil {
-			yield(nil, errors.New("pages: nil *http.Client"))
+			yield(nil, ErrNilClient)
 			return
 		}
 		next := url
