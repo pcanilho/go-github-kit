@@ -5,7 +5,8 @@
 // per page.
 //
 // Each Result[T] carries the per-page TotalCount and IncompleteResults
-// flag alongside the typed Item. ErrResultCapHit signals GitHub's
+// flag alongside the typed Item. ErrNilClient and ErrEmptyQuery guard the
+// arguments. ErrResultCapHit signals GitHub's
 // 1000-result hard cap (a 422 after page 10).
 //
 // Four endpoints are exposed: Issues, Code, Repos, Users. They share

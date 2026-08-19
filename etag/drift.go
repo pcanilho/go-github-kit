@@ -64,9 +64,12 @@ type Stats struct {
 	DegradedAt      time.Time // zero when not degraded
 	TotalMismatches int64     // monotonic over Transport lifetime
 
-	// TotalHits counts cache lookups that matched (transport.go:218 site).
+	// TotalHits counts cache lookups that matched (the hit path in
+	// RoundTrip). An entry with an empty body is not a hit: it is evicted
+	// and counted as a miss.
 	TotalHits int64
-	// TotalMisses counts cache lookups that missed (transport.go:231 site).
+	// TotalMisses counts cache lookups that missed (the miss path in
+	// RoundTrip).
 	TotalMisses int64
 	// TotalStores counts wire-200 entries written to cache. Includes
 	// re-validated stores: a 200 whose ETag matched precompute also
@@ -74,7 +77,8 @@ type Stats struct {
 	// cache backend", not "stores of new entries".
 	TotalStores int64
 	// TotalBypasses aggregates uncached pass-throughs: bypass_oversize,
-	// bypass_noncacheable, and the two no_etag_header sites.
+	// bypass_noncacheable, bypass_empty_body, and the two no_etag_header
+	// sites.
 	TotalBypasses int64
 }
 

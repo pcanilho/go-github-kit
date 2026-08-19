@@ -5,6 +5,128 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-08-19
+
+Compatibility and correctness release. Fixes an ETag defect that could
+serve an empty response body, adds `NewE` for SDK constructors that return
+an error, and updates all documentation and examples for go-github v87 and
+later. No API breaks: every addition is a new symbol, and no exported
+signature or type shape changed. One behavioural change needs action if you
+supply your own `etag.Cache`; see Changed.
+
+### Added
+
+- `ghkit.NewE[T](factory func(*http.Client) (T, error), opts ...Option)`,
+  for SDK constructors that can fail. It does not restore type inference on
+  `github.NewClient`, which is variadic over its own options, so the
+  closure is still required; what it adds is somewhere for the
+  constructor's error to go. Factory errors are wrapped as
+  `"ghkit: factory: %w"`, so `errors.Is` still separates them from ghkit's
+  own config sentinels. `ghkit.New` is unchanged and still binds directly
+  to single-argument constructors such as `githubv4.NewClient`.
+- `ghkit.WithETagTransport(func(*etag.Transport))`, which hands the caller
+  the constructed transport so `Stats()` can be polled for a `/healthz`
+  endpoint or a metrics gauge. Previously the transport was built inside
+  `HTTPClient` and unreachable, so the `Stats()` recipe the README and
+  `MIGRATION.md` describe had no supported entry point. The option enables
+  the ETag layer on its own, so it cannot silently never fire.
+- `polling.WithFullJitter(frac)`, applying uniform jitter over
+  `[interval - span/2, interval + span/2]` so concurrent pollers
+  de-correlate. `polling.WithJitter` keeps its documented deterministic
+  offset; whichever of the two is applied last wins.
+- `ErrNilClient` in `pages`, `polling` and `search`, plus
+  `search.ErrEmptyQuery`. These conditions previously returned inline
+  `errors.New` values that no caller could match with `errors.Is`. Message
+  strings are unchanged.
+- `etag.KindBypassEmptyBody`, the `Event` kind for the empty-body bypass
+  described under Fixed. It counts toward `Stats().TotalBypasses` like the
+  other bypass kinds.
+- `ghkit.ErrETagTransportType`, returned by `HTTPClient` if the constructed
+  ETag transport is not an `*etag.Transport`. Unreachable today; exported so
+  it is matchable rather than an opaque string if it ever fires.
+
+### Fixed
+
+- `etag`: HEAD requests now bypass the cache layer entirely. A response to
+  a HEAD carries no body (`net/http` sets `Body` to `http.NoBody`), so the
+  layer hashed an empty body against the server's ETag over the real one.
+  Every such request recorded a drift mismatch, and ten inside the 60s
+  window degraded the whole transport to passive mode. Once degraded, a
+  HEAD-stored entry made a later GET on the same URL receive a synthesised
+  200 carrying an empty body and `Content-Length: 0`. The mirror case
+  needed no degradation at all: a GET populated the entry and a subsequent
+  HEAD was handed a 200 with a body, violating HEAD semantics. HEAD
+  responses also keep their `ContentLength`, which the bounded read
+  previously zeroed. Two consequences follow: a HEAD no longer sends
+  `If-None-Match`, so it can no longer come back as a free 304, and it no
+  longer carries the `cond` cache-status header, so `cond.StatusOf` reports
+  `Updated` for every HEAD.
+- `etag`: responses with an empty body now bypass the cache, and a cached
+  entry with an empty body is evicted and treated as a miss. Storing one was
+  pointless (replaying it hands the caller nothing) and validating one
+  recorded a false drift mismatch on every request, which is the HEAD defect
+  above in general form. Evicting rather than merely skipping matters
+  because a pre-1.7.0 persistent `Cache` can hold body-less HEAD entries
+  under the key a GET uses, and skipping alone would leave them permanently:
+  nothing overwrites them when the wire response is also empty.
+  GitHub serves an empty body this way only for the raw representation of an
+  empty file or blob, so a poller watching one now spends a rate-limit unit
+  per poll where it previously got a free 304.
+- `retry`: guard against a nil `resp.Body` when draining a response before
+  a retry or a `Retry-After` abort. Reachable through a custom
+  `WithBaseTransport` whose `RoundTrip` returns a bare `&http.Response`,
+  where it panicked the caller's goroutine.
+
+### Changed
+
+- `go.mod` and `examples/go.mod` relax the Go directive from `1.26.5` to
+  `1.26` and add `toolchain go1.26.6`. The directive was a patch-level floor
+  imposed on every consumer and hard-failed builds under
+  `GOTOOLCHAIN=local`; the floor is now `1.26`, which lowers a requirement
+  rather than raising one. The `toolchain` line pins CI and local
+  development to 1.26.6, which carries the `net/http`, `net/url` and
+  `crypto/tls` fixes govulncheck requires. A `toolchain` directive in a
+  dependency is ignored, so it imposes nothing downstream.
+- `etag`: the cache key now includes a digest of `Accept` and
+  `X-GitHub-Api-Version` when either is present, so requests differing only
+  by those headers no longer share an entry and evict each other. Requests
+  carrying neither header keep exactly the key they had before. The
+  in-process LRU is bounded and self-evicts; a consumer-supplied
+  `etag.Cache` with no TTL retains old-format entries indefinitely, so set
+  a TTL or flush the key prefix on upgrade. During a rolling deploy both
+  formats coexist, which costs hit rate but is safe.
+
+### CI
+
+- The `pages` and `polling` live probes now run in the live job; both were
+  previously present but never executed. The `pages` probe moved off
+  `/user/repos`, a user-to-server endpoint that 403s under the App
+  installation token CI supplies, onto a public commits endpoint.
+- `FuzzParseRetryAfter` now gets coverage-guided fuzzing in its own job.
+  `-fuzz` takes a single target, so it cannot share the ETag job. The crash
+  corpus upload previously hardcoded `etag/testdata/fuzz/`, silently
+  discarding any `retry` crash.
+
+### Documentation
+
+- Quick start, recipes and all nine go-github examples updated for v87 and
+  later, which changed `NewClient` to
+  `(opts ...ClientOptionsFunc) (*Client, error)` and turned `UserAgent`,
+  `BaseURL` and `UploadURL` into read-only methods with no setters.
+  `examples/go.mod` moves from go-github v85 to v90.
+- Removed an incorrect claim that `WithEnterpriseURLs` requires a trailing
+  slash and errors without one. go-github normalises it, and has in every
+  version this project has documented.
+- The Prometheus recipe now builds on `ghkit.HTTPClient` instead of
+  hand-rolling `etag.NewTransport` plus `ratelimit.NewTransport`, which
+  silently omitted retry, throttle and oauth2.
+- README badges: the Go Report Card badge is removed, the service is retired
+  and rendered "go report: retired". Replaced with per-workflow status
+  badges plus release, Go version and license badges.
+- `ghtest` is documented as shipping four helpers rather than two;
+  `ETagServer` (1.5.0) and `LinkHeader` (1.4.0) shipped undocumented.
+  `examples/README.md` gained the missing `graphql-v4` row.
+
 ## [1.6.2] - 2026-07-30
 
 Maintenance release. Bumps the Go toolchain to 1.26.5 to pick up the
@@ -683,6 +805,7 @@ and rotating PATs alike.
 - `golang.org/x/oauth2` v0.36.0
 - `golang.org/x/time` v0.15.0
 
+[1.7.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.7.0
 [1.6.2]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.6.2
 [1.6.1]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.6.1
 [1.6.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.6.0

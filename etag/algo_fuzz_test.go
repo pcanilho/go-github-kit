@@ -24,7 +24,7 @@ func FuzzETag_ComputeExpectedETag(f *testing.F) {
 			h["Accept"] = strings.Split(accept, "\n")
 		}
 		if auth != "" {
-			h["Authorization"] = strings.Split(auth, "\n")
+			h[headerAuthorization] = strings.Split(auth, "\n")
 		}
 		if cookie != "" {
 			h["Cookie"] = strings.Split(cookie, "\n")

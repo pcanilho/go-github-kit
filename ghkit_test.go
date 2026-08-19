@@ -431,10 +431,7 @@ func (s *cooldownServer) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Unlock()
 
 	if inCooldown {
-		retryAfter := int(math.Ceil(time.Until(cooldownUntil).Seconds()))
-		if retryAfter < 1 {
-			retryAfter = 1
-		}
+		retryAfter := max(int(math.Ceil(time.Until(cooldownUntil).Seconds())), 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		w.WriteHeader(http.StatusForbidden)
@@ -494,9 +491,7 @@ func TestGHKit_E2E_PostCooldownReleaseBoundedByBurst(t *testing.T) {
 	defer cancel()
 
 	var trigWG sync.WaitGroup
-	trigWG.Add(1)
-	go func() {
-		defer trigWG.Done()
+	trigWG.Go(func() {
 		req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL, nil)
 		r, err := hc.Do(req)
 		if err != nil {
@@ -504,7 +499,7 @@ func TestGHKit_E2E_PostCooldownReleaseBoundedByBurst(t *testing.T) {
 			return
 		}
 		_ = r.Body.Close()
-	}()
+	})
 
 	select {
 	case <-firstHitDone:
@@ -597,9 +592,7 @@ func TestGHKit_E2E_RateLimitParksDuringSecondaryLimit(t *testing.T) {
 	defer cancel()
 
 	var trigWG sync.WaitGroup
-	trigWG.Add(1)
-	go func() {
-		defer trigWG.Done()
+	trigWG.Go(func() {
 		req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL, nil)
 		r, err := hc.Do(req)
 		if err != nil {
@@ -607,7 +600,7 @@ func TestGHKit_E2E_RateLimitParksDuringSecondaryLimit(t *testing.T) {
 			return
 		}
 		_ = r.Body.Close()
-	}()
+	})
 
 	select {
 	case <-firstHitDone:
@@ -718,14 +711,12 @@ func TestGHKit_E2E_ContextCancelDuringCooldown(t *testing.T) {
 		}
 
 		var trigWG sync.WaitGroup
-		trigWG.Add(1)
-		go func() {
-			defer trigWG.Done()
+		trigWG.Go(func() {
 			r, err := hc.Get(srv.URL)
 			if err == nil {
 				_ = r.Body.Close()
 			}
-		}()
+		})
 
 		select {
 		case <-firstHitDone:

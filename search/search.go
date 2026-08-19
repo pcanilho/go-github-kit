@@ -20,6 +20,13 @@ import (
 // after page 10 (10 * per_page=100 = 1000 items).
 var ErrResultCapHit = errors.New("search: GitHub 1000-result cap reached")
 
+// ErrNilClient is returned by the iterators when the supplied
+// *http.Client is nil.
+var ErrNilClient = errors.New("search: nil *http.Client")
+
+// ErrEmptyQuery is returned when the q parameter is empty.
+var ErrEmptyQuery = errors.New("search: q is required")
+
 // capSubstring is undocumented in GitHub's status table. Pinned
 // in tests so drift surfaces.
 const capSubstring = "Only the first 1000 search results are available"
@@ -114,7 +121,7 @@ func iterate[T any](ctx context.Context, c *http.Client, path, q string, opts []
 	return func(yield func(Result[T], error) bool) {
 		var zero Result[T]
 		if c == nil {
-			yield(zero, errors.New("search: nil *http.Client"))
+			yield(zero, ErrNilClient)
 			return
 		}
 		cfg := newConfig(opts)
@@ -178,7 +185,7 @@ func decodeEnvelope[T any](resp *http.Response) (envelope[T], error) {
 
 func buildURL(base, q string, cfg *config) (string, error) {
 	if q == "" {
-		return "", errors.New("search: q is required")
+		return "", ErrEmptyQuery
 	}
 	u, err := url.Parse(base)
 	if err != nil {
@@ -188,10 +195,7 @@ func buildURL(base, q string, cfg *config) (string, error) {
 	v.Set("q", q)
 	perPage := 100
 	if cfg.perPage > 0 {
-		perPage = cfg.perPage
-		if perPage > 100 {
-			perPage = 100
-		}
+		perPage = min(cfg.perPage, 100)
 	}
 	v.Set("per_page", strconv.Itoa(perPage))
 	if cfg.sort != "" {

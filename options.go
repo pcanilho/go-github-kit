@@ -32,8 +32,9 @@ type config struct {
 	timeout time.Duration
 
 	// ETag settings.
-	etagEnabled bool
-	etagOpts    []etag.Option
+	etagEnabled      bool
+	etagOpts         []etag.Option
+	etagTransportFns []func(*etag.Transport)
 
 	// Reactive rate limiter (go-github-ratelimit).
 	rateLimitEnabled        bool // set to false by WithRateLimitDisabled
@@ -99,6 +100,21 @@ func WithETagCache(opts ...etag.Option) Option {
 	return optionFunc(func(c *config) {
 		c.etagEnabled = true
 		c.etagOpts = append(c.etagOpts, opts...)
+	})
+}
+
+// WithETagTransport hands the constructed *etag.Transport to fn, so callers
+// can poll Stats(). Without it the transport is unreachable: HTTPClient
+// builds it internally and buries it under the layers above.
+//
+// Enables the ETag layer on its own. fn runs once before HTTPClient returns.
+// Repeated use accumulates rather than overwrites; a nil fn is ignored.
+func WithETagTransport(fn func(*etag.Transport)) Option {
+	return optionFunc(func(c *config) {
+		c.etagEnabled = true
+		if fn != nil {
+			c.etagTransportFns = append(c.etagTransportFns, fn)
+		}
 	})
 }
 

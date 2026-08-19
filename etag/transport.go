@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,8 +74,9 @@ var (
 )
 
 // Transport is an http.RoundTripper that adds If-None-Match on cacheable
-// GET/HEAD requests and replays the cached body as a synthesised 200 when
-// the server answers with 304 Not Modified.
+// GET requests and replays the cached body as a synthesised 200 when the
+// server answers with 304 Not Modified. Every other method, HEAD included,
+// passes straight through; see cacheable in algo.go for why.
 //
 // Transport runs precompute-mode by default: the If-None-Match value is
 // computed from the cached body and the CURRENT request headers, so cached
@@ -217,15 +219,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("etag: scopeFn: %w", err)
 	}
-	key := cacheKey(req.URL, digest)
-	entry, haveEntry, getErr := t.cache.Get(ctx, key)
-	if getErr != nil {
-		// Backend-side error (e.g. Redis network blip). Treat as a miss
-		// and log; never fail the request on a cache-read failure.
-		t.logEvent(ctx, "get_error", req.URL.Path, nil, nil)
-		t.emit(ctx, Event{Kind: KindGetError, URL: origURL, PathTemplate: tmpl, Err: getErr})
-		haveEntry = false
-	}
+	key := cacheKey(req, digest)
+	entry, haveEntry := t.lookup(ctx, req, key, origURL, tmpl)
 	if haveEntry {
 		t.logEvent(ctx, "hit", req.URL.Path, &entry, nil)
 		t.totalHits.Add(1)
@@ -334,6 +329,18 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return resp, nil
 		}
 
+		// Nothing to replay, and hashing it against the server's ETag would
+		// record a false drift mismatch. Bypass before validate.
+		if len(body) == 0 {
+			t.logEvent(ctx, "bypass_empty_body", req.URL.Path, nil, resp)
+			t.totalBypasses.Add(1)
+			t.emit(ctx, Event{
+				Kind: KindBypassEmptyBody, URL: origURL, PathTemplate: tmpl,
+				Status: resp.StatusCode, GitHubRequestID: resp.Header.Get("X-GitHub-Request-Id"),
+			})
+			return resp, nil
+		}
+
 		// Validation feeds the drift detector and the warn log. Storage
 		// proceeds in both cases: passive mode needs the latest server
 		// ETag to send, and precompute mode never reads entry.ETag.
@@ -418,6 +425,27 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	return resp, nil
+}
+
+// lookup reads the cache. A read error is logged and treated as a miss.
+// An empty-bodied entry is evicted, not just skipped: skipping alone leaves
+// it immortal when the wire response is also empty, and bypasses the
+// 404/410 eviction, which is gated on having an entry.
+func (t *Transport) lookup(ctx context.Context, req *http.Request, key string, origURL *url.URL, tmpl string) (Entry, bool) {
+	entry, ok, err := t.cache.Get(ctx, key)
+	if err != nil {
+		t.logEvent(ctx, "get_error", req.URL.Path, nil, nil)
+		t.emit(ctx, Event{Kind: KindGetError, URL: origURL, PathTemplate: tmpl, Err: err})
+		return Entry{}, false
+	}
+	if ok && len(entry.Body) == 0 {
+		if rmErr := t.cache.Remove(ctx, key); rmErr != nil {
+			t.logEvent(ctx, "remove_error", req.URL.Path, nil, nil)
+			t.emit(ctx, Event{Kind: KindRemoveError, URL: origURL, PathTemplate: tmpl, Err: rmErr})
+		}
+		return Entry{}, false
+	}
+	return entry, ok
 }
 
 // buildIfNoneMatch returns the If-None-Match value to send on a cache-hit
@@ -509,12 +537,36 @@ func (t *Transport) emit(ctx context.Context, evt Event) {
 	t.eventCallback(ctx, evt)
 }
 
-// cacheKey is the URL plus the per-Transport scope digest. Fragments are
-// stripped because they are never sent over the wire.
-func cacheKey(u *url.URL, scopeDigest string) string {
-	stripped := *u
+// variantHeaders select a different representation of the same URL. Accept
+// is already in the ETag hash domain (algo.go); X-GitHub-Api-Version is not,
+// but GitHub serves a different shape per version.
+var variantHeaders = []string{headerAccept, "X-GitHub-Api-Version"}
+
+// cacheKey is the URL plus the per-Transport scope digest, plus a digest of
+// the variant headers when any are set. Fragments are stripped (never sent).
+// The suffix is omitted when no variant header is set, so those keys are
+// unchanged from before 1.7.0.
+func cacheKey(req *http.Request, scopeDigest string) string {
+	stripped := *req.URL
 	stripped.Fragment = ""
-	return stripped.String() + "|" + scopeDigest
+	base := stripped.String() + "|" + scopeDigest
+
+	// Header.Values canonicalises, so "X-GitHub-Api-Version" and go-github's
+	// "X-Github-Api-Version" land on one key.
+	var variant strings.Builder
+	for _, name := range variantHeaders {
+		for _, v := range req.Header.Values(name) {
+			variant.WriteString(name)
+			variant.WriteByte(':')
+			variant.WriteString(v)
+			variant.WriteByte('\n')
+		}
+	}
+	if variant.Len() == 0 {
+		return base
+	}
+	sum := sha256.Sum256([]byte(variant.String()))
+	return base + "|" + hex.EncodeToString(sum[:])
 }
 
 // resolveScope returns the per-request scope digest. With WithKeyScope it

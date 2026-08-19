@@ -9,7 +9,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/google/go-github/v85/github"
+	"github.com/google/go-github/v90/github"
 	ghkit "github.com/pcanilho/go-github-kit"
 	"github.com/pcanilho/go-github-kit/search"
 )

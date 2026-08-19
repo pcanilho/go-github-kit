@@ -125,7 +125,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: go test -tags=live (etag + retry)
+      - name: go test -tags=live (etag + retry + pages + polling)
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: go test -tags=live -run 'TestETag_Live|TestRetry_Live' ./etag/... ./retry/...
+        # Server-to-server endpoints only; user-to-server ones 403 under
+        # the App installation token.
+        run: go test -tags=live -run 'TestETag_Live|TestRetry_Live|TestPages_Live|TestPoll_Live' ./etag/... ./retry/... ./pages/... ./polling/...

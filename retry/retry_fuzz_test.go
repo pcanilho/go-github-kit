@@ -43,7 +43,7 @@ func FuzzParseRetryAfter(f *testing.F) {
 		}
 
 		switch sourceLabel(dur, outcome) {
-		case "retry_after", "jitter", "malformed":
+		case "retry_after", sourceJitter, "malformed":
 		default:
 			t.Fatalf("unknown source label for (%v, %v) input %q", dur, outcome, header)
 		}

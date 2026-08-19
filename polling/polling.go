@@ -9,6 +9,8 @@ import (
 	"io"
 	"iter"
 	"log/slog"
+	"math"
+	"math/rand/v2"
 	"net/http"
 	"time"
 
@@ -33,6 +35,10 @@ var ErrInvalidOption = errors.New("polling: invalid option")
 // ErrPredicatePanic is yielded when WithDone or WithDoneT panics.
 var ErrPredicatePanic = errors.New("polling: predicate panicked")
 
+// ErrNilClient is returned by Poll and As when the supplied
+// *http.Client is nil.
+var ErrNilClient = errors.New("polling: nil *http.Client")
+
 // Option configures a polling iterator.
 type Option func(*config)
 
@@ -43,6 +49,7 @@ type config struct {
 	maxAttempts int
 	maxWall     time.Duration
 	jitter      float64
+	fullJitter  bool
 	honorRA     bool
 	changeOnly  bool
 	logger      *slog.Logger
@@ -108,8 +115,28 @@ func WithMaxWallClock(d time.Duration) Option {
 // WithJitter applies a deterministic mid-point jitter:
 // interval + (interval * frac / 2), clamped to [interval/2, 3*interval/2].
 // Frac is clamped to [0, 1]. Not applied when honoring Retry-After.
+//
+// Clears WithFullJitter, so the last of the two applied wins.
 func WithJitter(frac float64) Option {
-	return func(c *config) { c.jitter = frac }
+	return func(c *config) {
+		c.jitter = frac
+		c.fullJitter = false
+	}
+}
+
+// WithFullJitter applies uniform jitter over
+// [interval - span/2, interval + span/2] where span = interval * frac, so
+// concurrent pollers de-correlate. Frac is clamped to [0, 1]; at frac=1 the
+// range is [interval/2, 3*interval/2]. Not applied when honoring
+// Retry-After.
+//
+// Prefer this over WithJitter, which adds a fixed offset and leaves pollers
+// started together in step. The last of the two applied wins.
+func WithFullJitter(frac float64) Option {
+	return func(c *config) {
+		c.jitter = frac
+		c.fullJitter = true
+	}
 }
 
 // WithHonorRetryAfter (default true) honors the upstream Retry-After
@@ -230,7 +257,7 @@ func Poll(
 ) iter.Seq2[*http.Response, error] {
 	return func(yield func(*http.Response, error) bool) {
 		if c == nil {
-			yield(nil, errors.New("polling: nil *http.Client"))
+			yield(nil, ErrNilClient)
 			return
 		}
 		if interval <= 0 {
@@ -440,10 +467,7 @@ func nextSleep(cfg *config, resp *http.Response, interval time.Duration) time.Du
 	if cfg.honorRA && resp != nil {
 		if d, ok := retry.RetryAfter(resp); ok {
 			lo := interval
-			hi := interval
-			if cfg.maxWall > hi {
-				hi = cfg.maxWall
-			}
+			hi := max(cfg.maxWall, interval)
 			if d < lo {
 				d = lo
 			}
@@ -455,8 +479,21 @@ func nextSleep(cfg *config, resp *http.Response, interval time.Duration) time.Du
 	}
 	d := interval
 	if cfg.jitter > 0 {
-		span := time.Duration(float64(interval) * cfg.jitter)
-		d = interval + span/2
+		// Clamp in float space. Out-of-range float64->int64 is
+		// implementation-defined: amd64 yields MinInt64, arm64 saturates to
+		// MaxInt64, so no post-conversion check catches both.
+		var span time.Duration
+		if f := float64(interval) * cfg.jitter; f >= 1 && f < float64(math.MaxInt64) {
+			span = time.Duration(f)
+		}
+		if cfg.fullJitter {
+			// Uniform across the span, centred on interval. Unlike retry's
+			// decorrelated backoff this must not drift upward.
+			//nolint:gosec // G404: math/rand/v2 is intentional for jitter; not a crypto context.
+			d = interval - span/2 + time.Duration(rand.Int64N(int64(span)+1))
+		} else {
+			d = interval + span/2
+		}
 		if d < interval/2 {
 			d = interval / 2
 		}

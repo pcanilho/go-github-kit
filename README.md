@@ -1,11 +1,16 @@
 # `ghkit`
 
-A small Go toolkit that wraps [`github.com/google/go-github`](https://github.com/google/go-github) (REST), [`github.com/shurcooL/githubv4`](https://github.com/shurcooL/githubv4) (GraphQL), or any `func(*http.Client) T` client factory with ETag caching, reactive rate limiting, and a client-side token bucket. Opt into what you need; compose the rest yourself.
+A small Go toolkit that wraps [`github.com/google/go-github`](https://github.com/google/go-github) (REST), [`github.com/shurcooL/githubv4`](https://github.com/shurcooL/githubv4) (GraphQL), or any client factory with ETag caching, reactive rate limiting, and a client-side token bucket. Opt into what you need; compose the rest yourself.
 
 [![CI](https://github.com/pcanilho/go-github-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/pcanilho/go-github-kit/actions/workflows/ci.yml)
+[![Fuzz](https://github.com/pcanilho/go-github-kit/actions/workflows/fuzz.yml/badge.svg)](https://github.com/pcanilho/go-github-kit/actions/workflows/fuzz.yml)
+[![gitleaks](https://github.com/pcanilho/go-github-kit/actions/workflows/gitleaks.yml/badge.svg)](https://github.com/pcanilho/go-github-kit/actions/workflows/gitleaks.yml)
+[![Release](https://github.com/pcanilho/go-github-kit/actions/workflows/release.yml/badge.svg)](https://github.com/pcanilho/go-github-kit/actions/workflows/release.yml)
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/pcanilho/go-github-kit.svg)](https://pkg.go.dev/github.com/pcanilho/go-github-kit)
-[![Go Report Card](https://goreportcard.com/badge/github.com/pcanilho/go-github-kit)](https://goreportcard.com/report/github.com/pcanilho/go-github-kit)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/github/v/release/pcanilho/go-github-kit?label=version&sort=semver)](https://github.com/pcanilho/go-github-kit/releases)
+[![Go](https://img.shields.io/github/go-mod/go-version/pcanilho/go-github-kit)](go.mod)
+[![License](https://img.shields.io/github/license/pcanilho/go-github-kit)](LICENSE)
 
 ## Why?
 
@@ -30,15 +35,19 @@ import (
     "log"
     "os"
 
-    "github.com/google/go-github/v85/github"
+    "github.com/google/go-github/v90/github"
     ghkit "github.com/pcanilho/go-github-kit"
 )
 
 func main() {
-    gh, err := ghkit.New(github.NewClient,
+    hc, err := ghkit.HTTPClient(
         ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
         ghkit.WithETagCache(),
     )
+    if err != nil {
+        log.Fatal(err)
+    }
+    gh, err := github.NewClient(github.WithHTTPClient(hc))
     if err != nil {
         log.Fatal(err)
     }
@@ -50,7 +59,26 @@ func main() {
 }
 ```
 
-`ghkit.New` is generic over the returned type; passing `github.NewClient` lets type inference pick up `*github.Client`. ghkit itself has zero dependency on `go-github`. It isn't in `go.mod`, isn't imported, and won't end up in your compiled binary unless you pull it in yourself. Pass whichever go-github major (or any other `func(*http.Client) T` factory) you want.
+ghkit itself has zero dependency on `go-github`. It isn't in `go.mod`, isn't imported, and won't end up in your compiled binary unless you pull it in yourself. Use whichever go-github major you like: **no ghkit release can force an SDK version on you.**
+
+`ghkit.HTTPClient` returns the `*http.Client` and lets you construct the SDK client yourself. If you prefer a single call, `ghkit.NewE` takes a `func(*http.Client) (T, error)` factory, and `ghkit.New` takes a `func(*http.Client) T` one for constructors that cannot fail, such as `githubv4.NewClient`.
+
+### go-github v87 and later
+
+`github.NewClient` returns `(*github.Client, error)` since v87, and `UserAgent`, `BaseURL` and `UploadURL` are now read-only methods. Either use the two-step form above, or:
+
+```go
+gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
+    return github.NewClient(
+        github.WithHTTPClient(hc),
+        github.WithUserAgent("my-app/1.0"),
+    )
+}, ghkit.WithToken(tok))
+```
+
+On v86 and earlier, `ghkit.New(github.NewClient, ...)` still works.
+
+Do not pass `github.WithTransport` or `github.WithEnvProxy`: the first replaces ghkit's transport stack, the second errors because ghkit's outermost transport is not an `*http.Transport`.
 
 For runnable starter programs, see [`examples/`](examples/): `static-pat`, `installation-token`, `graphql-v4`, `backfill`, `github-enterprise`, and `retry-on-flaky` are each a complete `main()` you can copy-paste.
 
@@ -77,7 +105,9 @@ The rate-limit layer's named options (`WithPrimaryLimitDetected`, `WithSecondary
 <summary><b>Recommended setup for a long-lived service</b></summary>
 
 ```go
-gh, err := ghkit.New(github.NewClient,
+gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
+    return github.NewClient(github.WithHTTPClient(hc))
+},
     ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
     ghkit.WithETagCache(),
     ghkit.WithRetry(),
@@ -93,7 +123,9 @@ Defaults are tuned for steady-state operators: rate-limit on, retry 3 attempts w
 <summary><b>Static PAT with ETag caching</b></summary>
 
 ```go
-gh, err := ghkit.New(github.NewClient,
+gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
+    return github.NewClient(github.WithHTTPClient(hc))
+},
     ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
     ghkit.WithETagCache(),
 )
@@ -117,7 +149,7 @@ v4, err := ghkit.New(githubv4.NewClient,
 )
 ```
 
-`ghkit.New` is generic; `githubv4.NewClient` satisfies `func(*http.Client) *githubv4.Client` and gets oauth2 + retry + ratelimit + throttle + UA from the transport stack. ETag caching is REST-only by design (the etag layer no-ops on POST), so `WithETagCache` is a no-op for v4 traffic; leave it off unless you also issue REST GETs through the same client.
+`ghkit.New` is generic; `githubv4.NewClient` satisfies `func(*http.Client) *githubv4.Client` and gets oauth2 + retry + ratelimit + throttle + UA from the transport stack. ETag caching is REST-only by design (the etag layer no-ops on anything but GET), so `WithETagCache` is a no-op for v4 traffic; leave it off unless you also issue REST GETs through the same client.
 
 A runnable version lives at [`examples/graphql-v4/`](examples/graphql-v4/main.go).
 </details>
@@ -134,7 +166,7 @@ import (
     "net/http"
     "os"
 
-    "github.com/google/go-github/v85/github"
+    "github.com/google/go-github/v90/github"
     ghkit "github.com/pcanilho/go-github-kit"
     "github.com/pcanilho/go-github-kit/pages"
 )
@@ -181,7 +213,7 @@ import (
     "os"
     "time"
 
-    "github.com/google/go-github/v85/github"
+    "github.com/google/go-github/v90/github"
     ghkit "github.com/pcanilho/go-github-kit"
     "github.com/pcanilho/go-github-kit/polling"
     "github.com/pcanilho/go-github-kit/retry"
@@ -204,7 +236,7 @@ seq := polling.As[*github.WorkflowRun](
     nil, 15*time.Second,
     polling.WithDoneT(func(r *github.WorkflowRun) bool { return r.GetStatus() == "completed" }),
     polling.WithMaxWallClock(30*time.Minute),
-    polling.WithJitter(0.2),
+    polling.WithFullJitter(0.2),
 )
 
 var run *github.WorkflowRun
@@ -217,6 +249,8 @@ for r, err := range seq {
 }
 log.Printf("conclusion=%s", run.GetConclusion())
 ```
+
+`WithFullJitter` samples uniformly around the interval so concurrent pollers de-correlate; `WithJitter` applies a fixed offset instead and leaves pollers started together in step. The last of the two applied wins.
 
 Sharp edges: each `c.Do` may itself loop through `retry.Transport` (pass `retry.WithMaxAttempts(1)` when polling owns the outer loop); `throttle.WithRequestsPerSecond` below `1/interval` dominates cadence; with `WithETagCache` an unchanged resource yields identical decoded bytes per tick (pair with `polling.WithChangeOnly` to skip those silently). Pages-shape body ownership: `Poll` yields `*http.Response` and the caller closes; `As[T]` owns and closes via defer.
 
@@ -234,7 +268,7 @@ import (
     "errors"
     "fmt"
 
-    "github.com/google/go-github/v85/github"
+    "github.com/google/go-github/v90/github"
     "github.com/pcanilho/go-github-kit/search"
 )
 
@@ -273,7 +307,7 @@ import (
     "io"
     "net/http"
 
-    "github.com/google/go-github/v85/github"
+    "github.com/google/go-github/v90/github"
     "github.com/pcanilho/go-github-kit/cond"
 )
 
@@ -324,7 +358,7 @@ hc, err := ghkit.HTTPClient(
     ghkit.WithTimeout(5 * time.Second),
 )
 if err != nil { return err }
-gh := github.NewClient(hc)
+gh, err := github.NewClient(github.WithHTTPClient(hc))
 ```
 
 `WithKeyScope` is required whenever you supply a `Cache` yourself. It namespaces entries so two installations hitting the same URL never read each other's bodies.
@@ -395,7 +429,9 @@ Use `WithAutoKeyScope` instead of `WithKeyScope` when one `*http.Client` serves 
 <summary><b>Backfill shape with a proactive RPS cap</b></summary>
 
 ```go
-gh, err := ghkit.New(github.NewClient,
+gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
+    return github.NewClient(github.WithHTTPClient(hc))
+},
     ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
     ghkit.WithETagCache(etag.WithCache(etag.NewLRUCache(8192))),
     ghkit.WithRequestsPerSecond(1.3, 1),
@@ -409,27 +445,30 @@ gh, err := ghkit.New(github.NewClient,
 <summary><b>GitHub Enterprise Server</b></summary>
 
 ```go
-gh, err := ghkit.New(func(hc *http.Client) *github.Client {
-    c, ghErr := github.NewClient(hc).WithEnterpriseURLs(
-        "https://github.example.com/api/v3/",
-        "https://github.example.com/api/uploads/",
+gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
+    return github.NewClient(
+        github.WithHTTPClient(hc),
+        github.WithEnterpriseURLs(
+            "https://github.example.com/api/v3/",
+            "https://github.example.com/api/uploads/",
+        ),
+        github.WithUserAgent("my-app/1.0"),
     )
-    if ghErr != nil {
-        return github.NewClient(hc) // fall back to github.com on a bad URL
-    }
-    c.UserAgent = "my-app/1.0"
-    return c
 }, ghkit.WithToken(os.Getenv("GITHUB_ENTERPRISE_TOKEN")))
 ```
 
-`WithEnterpriseURLs` requires both URLs to end with a trailing slash and returns an error otherwise. `UserAgent` can also be set at the transport level via `ghkit.WithUserAgent("my-app/1.0")`, which applies to every outbound request regardless of which SDK you wrap around `HTTPClient()`.
+`NewE` propagates the constructor's error, so a bad enterprise URL fails here rather than silently yielding a github.com client. Sending an Enterprise token to public github.com is a credential-leak path, so do not fall back.
+
+go-github normalises the trailing slash on both URLs for you; it rejects an empty string. `UserAgent` can also be set at the transport level via `ghkit.WithUserAgent("my-app/1.0")`, which applies to every outbound request regardless of which SDK you wrap around `HTTPClient()`.
 </details>
 
 <details>
 <summary><b>Retry on transient failures (5xx, network errors)</b></summary>
 
 ```go
-gh, err := ghkit.New(github.NewClient,
+gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
+    return github.NewClient(github.WithHTTPClient(hc))
+},
     ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
     ghkit.WithRetry(), // 3 attempts, 200ms..2s decorrelated jitter, idempotent methods only
 )
@@ -440,7 +479,9 @@ Tuned policy with POST opt-in via `Idempotency-Key`:
 ```go
 import "github.com/pcanilho/go-github-kit/retry"
 
-gh, err := ghkit.New(github.NewClient,
+gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
+    return github.NewClient(github.WithHTTPClient(hc))
+},
     ghkit.WithToken(token),
     ghkit.WithRetry(
         retry.WithMaxAttempts(5),
@@ -478,6 +519,7 @@ import (
     "time"
 
     "github.com/prometheus/client_golang/prometheus"
+    ghkit "github.com/pcanilho/go-github-kit"
     "github.com/pcanilho/go-github-kit/etag"
     "github.com/pcanilho/go-github-kit/ratelimit"
 )
@@ -489,43 +531,62 @@ var (
     rl          = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "ghkit_ratelimit_total"},       []string{"kind", "category"})
 )
 
-func transport(scope string) (http.RoundTripper, error) {
-    etagRT, err := etag.NewTransport(nil,
-        etag.WithKeyScope(scope),
-        etag.WithEventCallback(func(_ context.Context, ev etag.Event) {
-            cacheEvents.WithLabelValues(string(ev.Kind)).Inc()
-            if ev.Status > 0 {
-                fromCache := ev.Kind == etag.KindHit || ev.Kind == etag.KindValidatedOK
-                reqs.WithLabelValues(fmt.Sprintf("%dxx", ev.Status/100), fmt.Sprint(fromCache)).Inc()
-            }
-            if ev.Kind == etag.KindMismatch {
-                mismatches.WithLabelValues(ev.PathTemplate).Inc()
-            }
-        }),
+func client(scope, token string) (*http.Client, error) {
+    return ghkit.HTTPClient(
+        ghkit.WithToken(token),
+        ghkit.WithETagCache(
+            etag.WithKeyScope(scope),
+            etag.WithEventCallback(func(_ context.Context, ev etag.Event) {
+                cacheEvents.WithLabelValues(string(ev.Kind)).Inc()
+                if ev.Status > 0 {
+                    fromCache := ev.Kind == etag.KindHit || ev.Kind == etag.KindValidatedOK
+                    reqs.WithLabelValues(fmt.Sprintf("%dxx", ev.Status/100), fmt.Sprint(fromCache)).Inc()
+                }
+                if ev.Kind == etag.KindMismatch {
+                    mismatches.WithLabelValues(ev.PathTemplate).Inc()
+                }
+            }),
+        ),
+        ghkit.WithRateLimit(
+            ratelimit.WithTotalSleepLimit(time.Hour),
+            ratelimit.WithPrimaryLimitDetected(func(ev *ratelimit.PrimaryEvent) {
+                rl.WithLabelValues("primary", string(ev.Category)).Inc()
+            }),
+            ratelimit.WithSecondaryLimitDetected(func(*ratelimit.SecondaryEvent) {
+                rl.WithLabelValues("secondary", "").Inc()
+            }),
+        ),
+        ghkit.WithRetry(),
     )
-    if err != nil {
-        return nil, err
-    }
-    return ratelimit.NewTransport(etagRT,
-        ratelimit.WithTotalSleepLimit(time.Hour),
-        ratelimit.WithPrimaryLimitDetected(func(ev *ratelimit.PrimaryEvent) {
-            rl.WithLabelValues("primary", string(ev.Category)).Inc()
-        }),
-        ratelimit.WithSecondaryLimitDetected(func(*ratelimit.SecondaryEvent) {
-            rl.WithLabelValues("secondary", "").Inc()
-        }),
-    ), nil
 }
 ```
 
 Metric names are illustrative; substitute your registry conventions.
+
+Build this through `ghkit.HTTPClient` rather than stacking `etag.NewTransport` and `ratelimit.NewTransport` by hand: the hand-built version silently omits retry, throttle and oauth2, and has to repeat the layer ordering correctly. `WithETagCache` and `WithRateLimit` forward their sub-options verbatim, so nothing is lost.
+
+For pull-based gauges, `ghkit.WithETagTransport` hands you the `*etag.Transport` so you can poll `Stats()`:
+
+```go
+var etagRT *etag.Transport
+hc, err := ghkit.HTTPClient(
+    ghkit.WithToken(token),
+    ghkit.WithETagTransport(func(t *etag.Transport) { etagRT = t }),
+)
+// etagRT.Stats() -> {Degraded, TotalHits, TotalMisses, TotalStores, ...}
+```
 </details>
 
 <details>
 <summary><b>Use only the etag sub-package in a hand-built stack</b></summary>
 
 ```go
-import "github.com/pcanilho/go-github-kit/etag"
+import (
+    "net/http"
+
+    "github.com/google/go-github/v90/github"
+    "github.com/pcanilho/go-github-kit/etag"
+)
 
 rt, err := etag.NewTransport(nil, // nil = default base with DisableCompression=true
     etag.WithCache(etag.NewLRUCache(1024)),
@@ -533,16 +594,17 @@ rt, err := etag.NewTransport(nil, // nil = default base with DisableCompression=
 )
 if err != nil { return err }
 hc := &http.Client{Transport: rt}
-gh := github.NewClient(hc)
+gh, err := github.NewClient(github.WithHTTPClient(hc))
 ```
 </details>
 
 ## Testing your code
 
-The `ghtest` sub-package provides two helpers for the GitHub-specific
-traps in writing tests: secondary-rate-limit classification and the
-bored-engineer ETag hash domain. See [`TESTING.md`](TESTING.md) for the
-full recipe set.
+The `ghtest` sub-package provides four helpers for the GitHub-specific
+traps in writing tests: `WriteSecondaryLimit`, `Write304IfMatch`,
+`ETagServer` (a ready-made ETag/304 test server) and `LinkHeader` (RFC 8288
+pagination fixtures). See [`TESTING.md`](TESTING.md) for the full recipe
+set.
 
 ## Migrating from an in-tree GitHub transport
 
@@ -556,7 +618,7 @@ The precompute trick, reverse-engineered by [bored-engineer](https://github.com/
 
 The algorithm walkthrough lives at <https://www.bored-engineer.com/posts/github-etag-algorithm/>.
 
-**What happens when GitHub changes the algorithm.** Every cacheable 200 is validated: the transport recomputes the expected ETag and compares it to the server's. After 10 mismatches inside a 60-second window, the transport silently switches to sending the server's stored ETag as `If-None-Match` -- 304s resume on stable bodies, you pay at most one extra miss per URL when the algorithm changes. After a 1-hour cooldown, the transport probes back to precompute on a small fraction of requests; consecutive successes restore precompute mode automatically, so a transient drift blip doesn't permanently degrade a long-running process. Wire `etag.WithEventCallback(...)` and filter on `etag.KindDriftDetected` / `etag.KindDriftRecovered` for transition alerts; call `(*etag.Transport).Stats()` for `/healthz` or dashboard polling. `Stats` exposes per-Outcome counters (`TotalHits`/`TotalMisses`/`TotalStores`/`TotalBypasses`) for hit-rate metrics without paying for DEBUG-level slog ingestion. For per-call attribution (URL, repo, consumer-side context like webhook event type), the same `WithEventCallback` hook delivers every cache decision. The fallback itself is unconditional and has no public knob -- this is by design.
+**What happens when GitHub changes the algorithm.** Every cacheable 200 is validated: the transport recomputes the expected ETag and compares it to the server's. After 10 mismatches inside a 60-second window, the transport silently switches to sending the server's stored ETag as `If-None-Match` -- 304s resume on stable bodies, you pay at most one extra miss per URL when the algorithm changes. After a 1-hour cooldown, the transport probes back to precompute on a small fraction of requests; consecutive successes restore precompute mode automatically, so a transient drift blip doesn't permanently degrade a long-running process. Wire `etag.WithEventCallback(...)` and filter on `etag.KindDriftDetected` / `etag.KindDriftRecovered` for transition alerts; call `(*etag.Transport).Stats()` for `/healthz` or dashboard polling, obtaining the transport via `ghkit.WithETagTransport`. `Stats` exposes per-Outcome counters (`TotalHits`/`TotalMisses`/`TotalStores`/`TotalBypasses`) for hit-rate metrics without paying for DEBUG-level slog ingestion. For per-call attribution (URL, repo, consumer-side context like webhook event type), the same `WithEventCallback` hook delivers every cache decision. The fallback itself is unconditional and has no public knob -- this is by design.
 
 What this kit adds on top of the original idea:
 
@@ -589,20 +651,9 @@ Each retry attempt is a real HTTP call from the throttle layer's perspective. `W
 
 ## Using a different go-github version
 
-The kit has no compile-time pin on `go-github`. Its main `go.mod` does not require `github.com/google/go-github`, so you choose the major. Two equally valid shapes:
+The kit has no compile-time pin on `go-github`. Its main `go.mod` does not require `github.com/google/go-github`, so you choose the major, and **upgrading ghkit never forces you to change your SDK version or rewrite import paths.**
 
-**Generic factory** (when you want type inference to pick up `*github.Client`):
-
-```go
-import githubX "github.com/google/go-github/vX/github"
-
-gh, err := ghkit.New(githubX.NewClient,
-    ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
-    ghkit.WithETagCache(),
-)
-```
-
-**Library-agnostic** (when you want the `*http.Client` and will wire your own client library):
+**Library-agnostic** (the `*http.Client` on its own; works with every SDK and every major):
 
 ```go
 import githubX "github.com/google/go-github/vX/github"
@@ -611,18 +662,37 @@ hc, err := ghkit.HTTPClient(
     ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
     ghkit.WithETagCache(),
 )
-gh := githubX.NewClient(hc)
+if err != nil { log.Fatal(err) }
+
+gh, err := githubX.NewClient(githubX.WithHTTPClient(hc)) // v87+
+if err != nil { log.Fatal(err) }
 ```
 
-The runnable demos under [`examples/`](examples/) live in their own sub-module and pin a specific go-github version (currently `v85`) so the kit's main `go.mod` stays clean across go-github upgrades.
+**Single call** via `NewE`, for any constructor returning `(T, error)`:
+
+```go
+gh, err := ghkit.NewE(func(hc *http.Client) (*githubX.Client, error) {
+    return githubX.NewClient(githubX.WithHTTPClient(hc))
+}, ghkit.WithToken(os.Getenv("GITHUB_TOKEN")))
+```
+
+**Generic factory** via `New`, for constructors that take the `*http.Client` alone and cannot fail. This fits `githubv4.NewClient`, and `go-github` up to v86:
+
+```go
+v4, err := ghkit.New(githubv4.NewClient,
+    ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
+)
+```
+
+The runnable demos under [`examples/`](examples/) live in their own sub-module and pin a specific go-github version (currently `v90`) so the kit's main `go.mod` stays clean across go-github upgrades.
 
 ## Development
 
 ```sh
 make test       # go test -race ./...
 make test-unit  # short tests only
-make test-live  # the live ETag drift probe (needs GITHUB_TOKEN)
-make test-fuzz  # fuzz the ETag hash for 30s
+make test-live  # the live probes: etag, retry, pages, polling (needs GITHUB_TOKEN)
+make test-fuzz  # fuzz the ETag hash and Retry-After parser, 30s each
 make lint       # golangci-lint v2
 make vuln       # govulncheck on the module
 make bench      # write benchmarks to dist/bench-current.txt

@@ -15,17 +15,18 @@ import (
 	"github.com/pcanilho/go-github-kit/pages"
 )
 
-// TestPages_Live_UserRepos walks /user/repos against api.github.com via
-// the real ghkit transport stack. It pins the iterator's behaviour
-// against actual GitHub Link headers so a server-side change in the
-// response shape (header ordering, rel quoting, additional params)
-// surfaces here rather than as a silent regression in production.
+// TestPages_Live_Commits walks a public repository's commits against
+// api.github.com, pinning the iterator against real Link headers so a
+// server-side shape change surfaces here.
 //
-// Hard-fatals on missing GITHUB_TOKEN so the live gate can never be
-// silently skipped in CI. For local development:
+// The endpoint must be readable by CI's App installation token. /user/repos
+// and /repos/{o}/{r}/stargazers both 403 with "not accessible by
+// integration"; commits work, as the etag probe's single-commit URL shows.
+//
+// Hard-fatals on missing GITHUB_TOKEN. For local development:
 //
 //	GITHUB_TOKEN=$(gh auth token) go test -tags=live -run TestPages_Live ./pages/...
-func TestPages_Live_UserRepos(t *testing.T) {
+func TestPages_Live_Commits(t *testing.T) {
 	tok := os.Getenv("GITHUB_TOKEN")
 	if tok == "" {
 		t.Fatal("GITHUB_TOKEN is required for the live pagination check; this gate is intentionally non-skippable.\n" +
@@ -53,7 +54,7 @@ func TestPages_Live_UserRepos(t *testing.T) {
 
 	var pagesWalked int
 	var totalItems int
-	for resp, err := range pages.Pages(ctx, hc, "GET", "https://api.github.com/user/repos?per_page=1", headers) {
+	for resp, err := range pages.Pages(ctx, hc, "GET", "https://api.github.com/repos/octocat/Spoon-Knife/commits?per_page=1", headers) {
 		if err != nil {
 			t.Fatalf("walk error on page %d: %v", pagesWalked+1, err)
 		}
@@ -70,15 +71,14 @@ func TestPages_Live_UserRepos(t *testing.T) {
 		_ = resp.Body.Close()
 		totalItems += len(arr)
 		pagesWalked++
-		// Cap the walk at 5 pages so the test does not hammer api.github.com
-		// for accounts with thousands of repos.
+		// Cap the walk; Spoon-Knife has many commits.
 		if pagesWalked >= 5 {
 			break
 		}
 	}
 
 	if pagesWalked == 0 {
-		t.Fatal("no pages walked; live endpoint may be down or the account has no repos")
+		t.Fatal("no pages walked; live endpoint may be down")
 	}
 	t.Logf("walked %d pages, %d items via Link header", pagesWalked, totalItems)
 }

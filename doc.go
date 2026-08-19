@@ -1,11 +1,18 @@
 // Package ghkit bundles ETag caching, rate limiting, retry on transient
 // failures, and a proactive token bucket behind a single options-pattern
-// API. New is generic over the returned client type, so ghkit has no
-// compile-time dependency on any specific GitHub SDK; pass any
-// func(*http.Client) T factory at the call site:
-// github.com/google/go-github's NewClient for REST,
-// github.com/shurcooL/githubv4's NewClient for GraphQL, or any other
-// client constructor that takes an *http.Client.
+// API. New and NewE are generic over the returned client type, so ghkit
+// has no compile-time dependency on any specific GitHub SDK, and no ghkit
+// release ever forces an SDK version on you.
+//
+// New takes a func(*http.Client) T factory, which fits
+// github.com/shurcooL/githubv4's NewClient. NewE takes a
+// func(*http.Client) (T, error) factory, for constructors that can fail.
+// HTTPClient returns the *http.Client on its own if you would rather
+// construct the SDK client yourself, which is the plainest option for
+// github.com/google/go-github v87 and later:
+//
+//	hc, err := ghkit.HTTPClient(ghkit.WithToken(tok))
+//	gh, err := github.NewClient(github.WithHTTPClient(hc))
 //
 // Transport stack (outer -> inner, each layer optional):
 //
@@ -49,8 +56,8 @@
 //  2. ghkit is auth-free; the SDK owns auth via per-call cloning. Omit
 //     WithToken/WithTokenSource. Build one ghkit HTTPClient at startup,
 //     hand it to your SDK, and let the SDK inject the current token per
-//     call (e.g. go-github's (*Client).WithAuthToken, which clones the
-//     go-github Client above ghkit's shared transport). The ETag LRU and
+//     call (e.g. go-github's WithAuthToken option, which sets auth above
+//     ghkit's shared transport). The ETag LRU and
 //     rate-limit bucket persist across token rotation. This is the
 //     canonical pattern for Kubernetes operators that reconcile with a
 //     per-reconcile installation token.
@@ -68,7 +75,7 @@
 // # GraphQL / v4 compatibility
 //
 // HTTPClient returns an *http.Client usable with any GraphQL v4 library
-// (e.g. github.com/shurcooL/githubv4). The etag layer no-ops on POST, so
+// (e.g. github.com/shurcooL/githubv4). The etag layer no-ops on anything but GET, so
 // v4 traffic flows through oauth2 + retry + ratelimit + throttle + UA
 // without ETag caching. Use WithETagCache only when you also issue REST
 // GETs through the same client.

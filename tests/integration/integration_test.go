@@ -144,10 +144,8 @@ func TestIntegration_ConcurrentPollingSameResource(t *testing.T) {
 	_, sleepOpt := captureSleeps()
 
 	var wg sync.WaitGroup
-	for w := 0; w < 4; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 4 {
+		wg.Go(func() {
 			for v, err := range polling.As[*payload](
 				t.Context(), hc, http.MethodGet, srv.URL, nil, nil,
 				time.Millisecond,
@@ -157,7 +155,7 @@ func TestIntegration_ConcurrentPollingSameResource(t *testing.T) {
 				_ = v
 				_ = err
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -183,16 +181,14 @@ func TestIntegration_ConcurrentCondFetch(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	for w := 0; w < 16; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 16 {
+		wg.Go(func() {
 			req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
 			_, _, err := cond.Fetch(t.Context(), hc, req, decode)
 			if err != nil {
 				t.Errorf("Fetch: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

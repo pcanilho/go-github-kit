@@ -50,7 +50,7 @@ func TestETag_Live_DriftCheck(t *testing.T) {
 				t.Fatal(err)
 			}
 			req.Header.Set("Accept", "application/vnd.github.v3+json")
-			req.Header.Set("Authorization", "token "+tok)
+			req.Header.Set(headerAuthorization, "token "+tok)
 			req.Header.Set("User-Agent", "go-github-kit-drift-check")
 
 			resp, err := client.Do(req)

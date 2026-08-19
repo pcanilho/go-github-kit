@@ -5,10 +5,10 @@ help:
 	@echo "Common targets:"
 	@echo "  make test         -- run the full test suite with -race"
 	@echo "  make test-unit    -- run short unit tests only"
-	@echo "  make test-live    -- run the live ETag drift probe (needs GITHUB_TOKEN)"
-	@echo "  make test-fuzz    -- fuzz the ETag hash for 30 seconds"
+	@echo "  make test-live    -- run the live probes (needs GITHUB_TOKEN)"
+	@echo "  make test-fuzz    -- fuzz the ETag hash and Retry-After parser"
 	@echo "  make bench        -- write benchmarks to dist/bench-current.txt"
-	@echo "  make bench-update -- prompt to update docs/bench-baseline.txt manually"
+	@echo "  make bench-update -- prompt to update the benchmark baseline"
 	@echo "  make lint         -- golangci-lint run"
 	@echo "  make vuln         -- govulncheck on the module"
 	@echo "  make tidy         -- go mod tidy with a diff gate"
@@ -23,17 +23,18 @@ test-unit:
 
 test-live:
 	@[ -n "$$GITHUB_TOKEN" ] || { echo "GITHUB_TOKEN required"; exit 1; }
-	go test -tags=live -run TestETag_Live ./etag/...
+	go test -tags=live -run 'TestETag_Live|TestRetry_Live|TestPages_Live|TestPoll_Live' ./etag/... ./retry/... ./pages/... ./polling/...
 
 test-fuzz:
 	go test -fuzz=FuzzETag_ComputeExpectedETag -fuzztime=30s ./etag/...
+	go test -fuzz=FuzzParseRetryAfter -fuzztime=30s ./retry/...
 
 bench:
 	@mkdir -p dist
 	go test -bench=. -benchmem -run=^$$ ./... | tee dist/bench-current.txt
 
 bench-update:
-	@echo "Review dist/bench-current.txt and copy manually to docs/bench-baseline.txt."
+	@echo "Review dist/bench-current.txt and copy manually to dist/bench-baseline.txt."
 
 lint:
 	golangci-lint run

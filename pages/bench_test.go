@@ -33,7 +33,7 @@ func benchPaginatedServer(b *testing.B, totalPages, perPage int) *httptest.Serve
 		}
 		body := make([]byte, 0, 64)
 		body = append(body, '[')
-		for i := 0; i < perPage; i++ {
+		for i := range perPage {
 			if i > 0 {
 				body = append(body, ',')
 			}

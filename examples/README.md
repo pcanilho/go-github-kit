@@ -2,7 +2,7 @@
 
 Runnable demo programs for [`github.com/pcanilho/go-github-kit`](https://github.com/pcanilho/go-github-kit).
 
-This directory is a **separate Go module** (its own `go.mod`). The kit itself has no compile-time dependency on `github.com/google/go-github` (`ghkit.New` is generic over the returned client type), so the kit's main `go.mod` does not pin `go-github`. The examples here do, because they show concrete usage with `github.NewClient`. Keeping this module separate means a breaking `go-github` major bumps the examples without touching the kit's own dependency surface.
+This directory is a **separate Go module** (its own `go.mod`). The kit itself has no compile-time dependency on `github.com/google/go-github` (`ghkit.New` and `ghkit.NewE` are generic over the returned client type), so the kit's main `go.mod` does not pin `go-github`. The examples here do, because they show concrete usage with `github.NewClient`. Keeping this module separate means a breaking `go-github` major bumps the examples without touching the kit's own dependency surface, and without forcing anything on consumers. These examples currently pin **v90**.
 
 ## Examples are copy-paste templates, not directly installable
 
@@ -31,5 +31,6 @@ When **copying an example into your own project**: drop the `replace` directive 
 | `poll-workflow-run/`      | Waits for a workflow run to reach `status="completed"` with `polling.As[*github.WorkflowRun]` + `WithDoneT` + `WithMaxWallClock` + `WithJitter`. |
 | `search-issues/`          | Walks `/search/issues` with `search.Issues[*github.Issue]`; surfaces `incomplete_results` and the 1000-result cap as `ErrResultCapHit`. |
 | `conditional-fetch/`      | Visible 304: `cond.Fetch[*github.Repository]` returns `cond.Unchanged` on the second call so downstream work can be skipped. |
+| `graphql-v4/`             | GraphQL v4 via `shurcooL/githubv4`, whose `NewClient` still binds directly to `ghkit.New`. |
 
 Each example reads its credentials from environment variables (e.g. `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`) and exercises one or more REST endpoints. They will fail at the API call without valid credentials. That's expected; they're starting templates, not standalone tools.

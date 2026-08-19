@@ -13,12 +13,15 @@ import (
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/google/go-github/v85/github"
+	"github.com/google/go-github/v90/github"
 	ghkit "github.com/pcanilho/go-github-kit"
 	"github.com/pcanilho/go-github-kit/etag"
 	"golang.org/x/oauth2"
 )
 
+// ghinstallation pins go-github v88. Only strings cross this boundary,
+// so the two majors do not meet.
+//
 // Adapter from ghinstallation.Transport to oauth2.TokenSource. ghkit does
 // not ship this bridge so the root module stays at four runtime deps;
 // callers copy these few lines (or substitute ghait for KMS-backed signing).
@@ -66,7 +69,11 @@ func main() {
 		log.Fatalf("ghkit.HTTPClient: %v", err)
 	}
 
-	gh := github.NewClient(hc)
+	gh, err := github.NewClient(github.WithHTTPClient(hc))
+	if err != nil {
+		log.Fatalf("github.NewClient: %v", err)
+	}
+
 	repo, _, err := gh.Repositories.Get(context.Background(), "google", "go-github")
 	if err != nil {
 		log.Fatalf("Repositories.Get: %v", err)

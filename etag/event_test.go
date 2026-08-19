@@ -90,7 +90,7 @@ func TestEventCallback_URLPopulated(t *testing.T) {
 	r := &recorder{}
 	c := newTestClient(t, WithEventCallback(r.record))
 
-	doGet(t, c, s.URL+"/users/octocat")
+	doGet(t, c, s.URL+testPathOctocat)
 
 	for _, e := range r.snapshot() {
 		if e.Kind == KindDriftDetected || e.Kind == KindDriftRecovered {
@@ -102,7 +102,7 @@ func TestEventCallback_URLPopulated(t *testing.T) {
 		if !strings.Contains(e.URL.Host, "127.0.0.1") && !strings.Contains(e.URL.Host, "localhost") {
 			t.Fatalf("unexpected host: %s", e.URL.Host)
 		}
-		if e.URL.Path != "/users/octocat" {
+		if e.URL.Path != testPathOctocat {
 			t.Fatalf("Path=%s, want /users/octocat", e.URL.Path)
 		}
 	}
@@ -114,7 +114,7 @@ func TestEventCallback_PathTemplateNormalised(t *testing.T) {
 	r := &recorder{}
 	c := newTestClient(t, WithEventCallback(r.record))
 
-	doGet(t, c, s.URL+"/users/octocat")
+	doGet(t, c, s.URL+testPathOctocat)
 
 	stores := r.byKind(KindStore)
 	if len(stores) != 1 {
@@ -443,6 +443,7 @@ func TestEventCallback_KindStringsMatchSlogKindAttribute(t *testing.T) {
 		{"RemoveError", KindRemoveError, "remove_error"},
 		{"BypassOversize", KindBypassOversize, "bypass_oversize"},
 		{"BypassNoncache", KindBypassNoncache, "bypass_noncacheable"},
+		{"BypassEmptyBody", KindBypassEmptyBody, "bypass_empty_body"},
 		{"NoEtagHeader", KindNoEtagHeader, "no_etag_header"},
 		{"ValidatedOK", KindValidatedOK, "validated_ok"},
 		{"InvalidatedGone", KindInvalidatedGone, "invalidated_gone"},

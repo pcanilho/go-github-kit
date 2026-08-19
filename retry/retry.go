@@ -245,7 +245,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 
 			if raOverride > t.maxDelay {
-				if resp != nil {
+				if resp != nil && resp.Body != nil {
 					_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
 					_ = resp.Body.Close()
 				}
@@ -262,9 +262,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				sleep = raOverride
 			}
 
+			// Body can be nil when a hand-rolled base transport supplied
+			// via WithBaseTransport returns a bare &http.Response.
 			if resp != nil {
-				_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
-				_ = resp.Body.Close()
+				if resp.Body != nil {
+					_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
+					_ = resp.Body.Close()
+				}
 				resp = nil
 			}
 
@@ -443,6 +447,10 @@ func parseRetryAfter(resp *http.Response) (time.Duration, parseOutcome) {
 	return 0, outcomeUnparseable
 }
 
+// sourceJitter labels a sleep whose duration came from computeJitter
+// rather than an upstream Retry-After.
+const sourceJitter = "jitter"
+
 func sourceLabel(raOverride time.Duration, outcome parseOutcome) string {
 	switch {
 	case raOverride > 0:
@@ -450,7 +458,7 @@ func sourceLabel(raOverride time.Duration, outcome parseOutcome) string {
 	case outcome == outcomeUnparseable:
 		return "malformed"
 	default:
-		return "jitter"
+		return sourceJitter
 	}
 }
 
