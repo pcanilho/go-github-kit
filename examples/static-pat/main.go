@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 
 	"github.com/google/go-github/v90/github"
@@ -13,9 +12,7 @@ import (
 )
 
 func main() {
-	gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
-		return github.NewClient(github.WithHTTPClient(hc))
-	},
+	gh, err := ghkit.NewE(ghkit.Adapt(github.NewClient, github.WithHTTPClient),
 		ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
 		ghkit.WithETagCache(),
 	)

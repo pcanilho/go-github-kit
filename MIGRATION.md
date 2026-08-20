@@ -88,7 +88,7 @@ What moves: the bespoke `etag_transport.go` and the manual `github_ratelimit.New
 
 Keep whichever `go-github` major you are pinned to. ghkit does not import `go-github` at all, so no ghkit release can force you to bump it or rewrite import paths. `HTTPClient()` returns an `*http.Client` you hand to your own version.
 
-Note that the "before" snippet above uses the pre-v87 `github.NewClient(hc).WithAuthToken(...)` API. From v87 the constructor is `NewClient(opts ...ClientOptionsFunc) (*Client, error)`, as shown in the "after" snippet.
+Note that the "before" snippet above uses the pre-v87 `github.NewClient(hc).WithAuthToken(...)` API. From v87 the constructor is `NewClient(opts ...ClientOptionsFunc) (*Client, error)`, as shown in the "after" snippet. Where you do not need go-github options, `ghkit.Adapt(github.NewClient, github.WithHTTPClient)` collapses the two steps into one; see Recipe 3.
 
 ## Recipe 2: Multi-installation webhook processor
 
@@ -192,16 +192,12 @@ func NewClient(token string, opts ...ETagOptions) (*Client, error) {
 
 ```go
 import (
-    "net/http"
-
     ghkit "github.com/pcanilho/go-github-kit"
     "github.com/pcanilho/go-github-kit/etag"
 )
 
 func NewClient(token string, etagSize int) (*github.Client, error) {
-    return ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
-        return github.NewClient(github.WithHTTPClient(hc))
-    },
+    return ghkit.NewE(ghkit.Adapt(github.NewClient, github.WithHTTPClient),
         ghkit.WithToken(token),
         ghkit.WithETagCache(etag.WithCache(etag.NewLRUCache(etagSize))),
         ghkit.WithRequestsPerSecond(1.3, 1),

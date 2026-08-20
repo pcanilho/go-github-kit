@@ -1,18 +1,27 @@
 // Package ghkit bundles ETag caching, rate limiting, retry on transient
 // failures, and a proactive token bucket behind a single options-pattern
-// API. New and NewE are generic over the returned client type, so ghkit
-// has no compile-time dependency on any specific GitHub SDK, and no ghkit
-// release ever forces an SDK version on you.
+// API. New, NewE and Adapt are generic over the returned client type, so
+// ghkit has no compile-time dependency on any specific GitHub SDK, and no
+// ghkit release ever forces an SDK version on you.
+//
+// For github.com/google/go-github v87 and later, Adapt with NewE is the
+// plainest option:
+//
+//	gh, err := ghkit.NewE(
+//	    ghkit.Adapt(github.NewClient, github.WithHTTPClient),
+//	    ghkit.WithToken(tok),
+//	)
+//
+// HTTPClient returns the *http.Client on its own if you would rather
+// construct the SDK client yourself. That form fits every SDK, and it is
+// what you want when the constructor needs its own options:
+//
+//	hc, err := ghkit.HTTPClient(ghkit.WithToken(tok))
+//	gh, err := github.NewClient(github.WithHTTPClient(hc))
 //
 // New takes a func(*http.Client) T factory, which fits
 // github.com/shurcooL/githubv4's NewClient. NewE takes a
 // func(*http.Client) (T, error) factory, for constructors that can fail.
-// HTTPClient returns the *http.Client on its own if you would rather
-// construct the SDK client yourself, which is the plainest option for
-// github.com/google/go-github v87 and later:
-//
-//	hc, err := ghkit.HTTPClient(ghkit.WithToken(tok))
-//	gh, err := github.NewClient(github.WithHTTPClient(hc))
 //
 // Transport stack (outer -> inner, each layer optional):
 //

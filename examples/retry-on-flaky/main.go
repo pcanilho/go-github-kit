@@ -17,9 +17,7 @@ import (
 )
 
 func main() {
-	gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
-		return github.NewClient(github.WithHTTPClient(hc))
-	},
+	gh, err := ghkit.NewE(ghkit.Adapt(github.NewClient, github.WithHTTPClient),
 		ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
 		ghkit.WithRetry(
 			retry.WithMaxAttempts(5),

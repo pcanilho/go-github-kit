@@ -46,7 +46,7 @@ Code in this repository:
 
 ### Out of scope: `google/go-github`
 
-`ghkit.New` and `ghkit.NewE` are generic over the returned client type, and **no part of this kit's main module imports `github.com/google/go-github`**. It is absent from the kit's `go.mod`, source tree, and compiled binary. Consumers wire whichever `go-github` major they choose via the generic factory (see the [README's "Using a different go-github version"](https://github.com/pcanilho/go-github-kit#using-a-different-go-github-version) section, and runnable starters in [`examples/`](https://github.com/pcanilho/go-github-kit/tree/main/examples)).
+`ghkit.New`, `ghkit.NewE` and `ghkit.Adapt` are generic over the returned client type, and **no part of this kit's main module imports `github.com/google/go-github`**. It is absent from the kit's `go.mod`, source tree, and compiled binary. Consumers wire whichever `go-github` major they choose via the generic factory (see the [README's "Using a different go-github version"](https://github.com/pcanilho/go-github-kit#using-a-different-go-github-version) section, and runnable starters in [`examples/`](https://github.com/pcanilho/go-github-kit/tree/main/examples)).
 
 `go-github` vulnerabilities are therefore not in scope for this kit's advisories. Please report and track them via the [`google/go-github` advisory channel](https://github.com/google/go-github/security) directly. The same applies to any other client library you wire into the generic factory.
 

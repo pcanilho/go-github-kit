@@ -17,6 +17,9 @@ import (
 func main() {
 	token := os.Getenv("GITHUB_ENTERPRISE_TOKEN")
 
+	// A closure rather than ghkit.Adapt: Adapt passes only the HTTP client,
+	// and this client needs go-github options of its own.
+	//
 	// NewE propagates the constructor error, so a bad enterprise URL stops
 	// us rather than yielding a github.com client.
 	gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {

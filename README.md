@@ -40,14 +40,10 @@ import (
 )
 
 func main() {
-    hc, err := ghkit.HTTPClient(
+    gh, err := ghkit.NewE(ghkit.Adapt(github.NewClient, github.WithHTTPClient),
         ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
         ghkit.WithETagCache(),
     )
-    if err != nil {
-        log.Fatal(err)
-    }
-    gh, err := github.NewClient(github.WithHTTPClient(hc))
     if err != nil {
         log.Fatal(err)
     }
@@ -61,11 +57,20 @@ func main() {
 
 ghkit itself has zero dependency on `go-github`. It isn't in `go.mod`, isn't imported, and won't end up in your compiled binary unless you pull it in yourself. Use whichever go-github major you like: **no ghkit release can force an SDK version on you.**
 
-`ghkit.HTTPClient` returns the `*http.Client` and lets you construct the SDK client yourself. If you prefer a single call, `ghkit.NewE` takes a `func(*http.Client) (T, error)` factory, and `ghkit.New` takes a `func(*http.Client) T` one for constructors that cannot fail, such as `githubv4.NewClient`.
+`ghkit.Adapt` is the go-github path: it converts `github.NewClient`, which is variadic over its own options, into the factory shape `ghkit.NewE` takes, so the whole client is one call.
+
+For anything else, `ghkit.HTTPClient` returns the `*http.Client` on its own and you construct the SDK client yourself:
+
+```go
+hc, err := ghkit.HTTPClient(ghkit.WithToken(tok))
+gh, err := github.NewClient(github.WithHTTPClient(hc))
+```
+
+That form fits every SDK, and it is what you want when the constructor needs its own options. `ghkit.New` takes a `func(*http.Client) T` factory for constructors that cannot fail, such as `githubv4.NewClient`.
 
 ### go-github v87 and later
 
-`github.NewClient` returns `(*github.Client, error)` since v87, and `UserAgent`, `BaseURL` and `UploadURL` are now read-only methods. Either use the two-step form above, or:
+`github.NewClient` returns `(*github.Client, error)` since v87, and `UserAgent`, `BaseURL` and `UploadURL` are now read-only methods. `ghkit.Adapt` covers it in one call, as shown above. When the constructor needs options of its own, pass a closure instead:
 
 ```go
 gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
@@ -76,9 +81,19 @@ gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
 }, ghkit.WithToken(tok))
 ```
 
-On v86 and earlier, `ghkit.New(github.NewClient, ...)` still works.
+`Adapt` takes no further options on purpose. `github.WithTransport` cannot be passed through it at all, since it takes an `http.RoundTripper` rather than an `*http.Client` and will not compile in that position.
 
-Do not pass `github.WithTransport` or `github.WithEnvProxy`: the first replaces ghkit's transport stack, the second errors because ghkit's outermost transport is not an `*http.Transport`.
+In a closure, do not pass any of these. ghkit already built the `*http.Client`, so each one either discards or overrides part of the stack:
+
+| Option | Effect | Silent? |
+| --- | --- | --- |
+| `github.WithTransport` | replaces ghkit's whole transport stack, so rate limiting, retry, ETag and your token are all dropped | yes |
+| `github.WithHTTPClient` a second time | replaces the client ghkit built | yes |
+| `github.WithTimeout` | overrides `ghkit.WithTimeout` | yes |
+| `github.WithAuthToken` | wraps a second auth layer around `ghkit.WithToken` | yes |
+| `github.WithEnvProxy` | errors, because ghkit's outermost transport is not an `*http.Transport` | no |
+
+On v86 and earlier, `ghkit.New(github.NewClient, ...)` still works.
 
 For runnable starter programs, see [`examples/`](examples/): `static-pat`, `installation-token`, `graphql-v4`, `backfill`, `github-enterprise`, and `retry-on-flaky` are each a complete `main()` you can copy-paste.
 
@@ -105,9 +120,7 @@ The rate-limit layer's named options (`WithPrimaryLimitDetected`, `WithSecondary
 <summary><b>Recommended setup for a long-lived service</b></summary>
 
 ```go
-gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
-    return github.NewClient(github.WithHTTPClient(hc))
-},
+gh, err := ghkit.NewE(ghkit.Adapt(github.NewClient, github.WithHTTPClient),
     ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
     ghkit.WithETagCache(),
     ghkit.WithRetry(),
@@ -123,9 +136,7 @@ Defaults are tuned for steady-state operators: rate-limit on, retry 3 attempts w
 <summary><b>Static PAT with ETag caching</b></summary>
 
 ```go
-gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
-    return github.NewClient(github.WithHTTPClient(hc))
-},
+gh, err := ghkit.NewE(ghkit.Adapt(github.NewClient, github.WithHTTPClient),
     ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
     ghkit.WithETagCache(),
 )
@@ -429,9 +440,7 @@ Use `WithAutoKeyScope` instead of `WithKeyScope` when one `*http.Client` serves 
 <summary><b>Backfill shape with a proactive RPS cap</b></summary>
 
 ```go
-gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
-    return github.NewClient(github.WithHTTPClient(hc))
-},
+gh, err := ghkit.NewE(ghkit.Adapt(github.NewClient, github.WithHTTPClient),
     ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
     ghkit.WithETagCache(etag.WithCache(etag.NewLRUCache(8192))),
     ghkit.WithRequestsPerSecond(1.3, 1),
@@ -457,6 +466,8 @@ gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
 }, ghkit.WithToken(os.Getenv("GITHUB_ENTERPRISE_TOKEN")))
 ```
 
+This one keeps the closure rather than `ghkit.Adapt`, because `Adapt` passes only the HTTP client and this client needs go-github options of its own.
+
 `NewE` propagates the constructor's error, so a bad enterprise URL fails here rather than silently yielding a github.com client. Sending an Enterprise token to public github.com is a credential-leak path, so do not fall back.
 
 go-github normalises the trailing slash on both URLs for you; it rejects an empty string. `UserAgent` can also be set at the transport level via `ghkit.WithUserAgent("my-app/1.0")`, which applies to every outbound request regardless of which SDK you wrap around `HTTPClient()`.
@@ -466,9 +477,7 @@ go-github normalises the trailing slash on both URLs for you; it rejects an empt
 <summary><b>Retry on transient failures (5xx, network errors)</b></summary>
 
 ```go
-gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
-    return github.NewClient(github.WithHTTPClient(hc))
-},
+gh, err := ghkit.NewE(ghkit.Adapt(github.NewClient, github.WithHTTPClient),
     ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
     ghkit.WithRetry(), // 3 attempts, 200ms..2s decorrelated jitter, idempotent methods only
 )
@@ -479,9 +488,7 @@ Tuned policy with POST opt-in via `Idempotency-Key`:
 ```go
 import "github.com/pcanilho/go-github-kit/retry"
 
-gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
-    return github.NewClient(github.WithHTTPClient(hc))
-},
+gh, err := ghkit.NewE(ghkit.Adapt(github.NewClient, github.WithHTTPClient),
     ghkit.WithToken(token),
     ghkit.WithRetry(
         retry.WithMaxAttempts(5),
@@ -668,15 +675,14 @@ gh, err := githubX.NewClient(githubX.WithHTTPClient(hc)) // v87+
 if err != nil { log.Fatal(err) }
 ```
 
-**Single call** via `NewE`, for any constructor returning `(T, error)`:
+**Single call** via `Adapt` and `NewE`, for a constructor that is variadic over its own options:
 
 ```go
-gh, err := ghkit.NewE(func(hc *http.Client) (*githubX.Client, error) {
-    return githubX.NewClient(githubX.WithHTTPClient(hc))
-}, ghkit.WithToken(os.Getenv("GITHUB_TOKEN")))
+gh, err := ghkit.NewE(ghkit.Adapt(githubX.NewClient, githubX.WithHTTPClient),
+    ghkit.WithToken(os.Getenv("GITHUB_TOKEN")))
 ```
 
-**Generic factory** via `New`, for constructors that take the `*http.Client` alone and cannot fail. This fits `githubv4.NewClient`, and `go-github` up to v86:
+**Generic factory** via `New`, for constructors that take the `*http.Client` alone and cannot fail. This fits `githubv4.NewClient`:
 
 ```go
 v4, err := ghkit.New(githubv4.NewClient,

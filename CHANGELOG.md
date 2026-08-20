@@ -5,6 +5,59 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-08-20
+
+Ergonomics release for go-github v87 and later. Adds `ghkit.Adapt`, which
+removes the factory closure the v1.7.0 docs said was unavoidable. Purely
+additive: no exported signature, type shape, sentinel or message string
+changed, and every call site that compiles against 1.7.0 still compiles and
+behaves identically.
+
+### Added
+
+- `ghkit.Adapt[T, O](factory func(...O) (T, error), httpOption func(*http.Client) O)`,
+  which converts an SDK constructor that is variadic over its own options
+  into the `func(*http.Client) (T, error)` shape `NewE` takes:
+
+  ```go
+  gh, err := ghkit.NewE(
+      ghkit.Adapt(github.NewClient, github.WithHTTPClient),
+      ghkit.WithToken(tok),
+  )
+  ```
+
+  This supersedes the 1.7.0 note that "the closure is still required" for
+  `github.NewClient`. The closure is still the documented path when the
+  constructor needs options of its own, such as `github.WithEnterpriseURLs`;
+  `Adapt` passes only the HTTP client.
+
+  `Adapt` pairs with `NewE`, not `New`. It fits constructors shaped
+  `func(...O) (T, error)`; SDKs taking a leading positional argument or a
+  context, such as `ghinstallation`, still use `HTTPClient` directly. A nil
+  argument yields a nil factory, so `New`/`NewE` report `ErrNilFactory`.
+
+  Still no `go-github` import in the kit: `Adapt` is generic over the option
+  type, so the SDK stays absent from `go.mod`, the source tree and the
+  compiled binary.
+
+### Fixed
+
+- The README's "do not pass these go-github options" list named only
+  `github.WithTransport` and `github.WithEnvProxy`. Three more silently
+  defeat the transport stack when passed to `github.NewClient` alongside a
+  ghkit-built client: a second `github.WithHTTPClient` replaces the client,
+  `github.WithTimeout` overrides `ghkit.WithTimeout`, and
+  `github.WithAuthToken` wraps a second auth layer around `ghkit.WithToken`.
+  All five are now documented with their effects. Behaviour is unchanged;
+  this was a documentation gap.
+
+### Changed (documentation only)
+
+- `Adapt` is now the leading form for go-github in the README quick start
+  and in the package docs. The two-step `HTTPClient` form keeps a named slot
+  as the general path: it fits every SDK, and it is what you want when the
+  constructor needs its own options.
+
 ## [1.7.0] - 2026-08-19
 
 Compatibility and correctness release. Fixes an ETag defect that could
@@ -805,6 +858,7 @@ and rotating PATs alike.
 - `golang.org/x/oauth2` v0.36.0
 - `golang.org/x/time` v0.15.0
 
+[1.8.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.8.0
 [1.7.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.7.0
 [1.6.2]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.6.2
 [1.6.1]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.6.1

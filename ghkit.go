@@ -142,7 +142,7 @@ func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error
 //
 // go-github v87 changed NewClient to
 // `NewClient(opts ...ClientOptionsFunc) (*Client, error)`, so it no longer
-// binds here. Use NewE, or build the client in two steps with HTTPClient.
+// binds here. Use Adapt with NewE instead.
 //
 // When factory is nil, New returns the zero value of T and ErrNilFactory.
 // When HTTPClient returns an error (invalid option combination), New
@@ -159,15 +159,24 @@ func New[T any](factory func(*http.Client) T, opts ...Option) (T, error) {
 	return factory(hc), nil
 }
 
-// NewE is New for SDK constructors that return an error:
+// NewE is New for SDK constructors that return an error. For go-github,
+// pair it with Adapt:
+//
+//	gh, err := ghkit.NewE(
+//	    ghkit.Adapt(github.NewClient, github.WithHTTPClient),
+//	    ghkit.WithToken(tok),
+//	)
+//
+// Pass a closure instead when the constructor needs its own options:
 //
 //	gh, err := ghkit.NewE(func(hc *http.Client) (*github.Client, error) {
-//	    return github.NewClient(github.WithHTTPClient(hc))
+//	    return github.NewClient(
+//	        github.WithHTTPClient(hc),
+//	        github.WithEnterpriseURLs(baseURL, uploadURL),
+//	    )
 //	}, ghkit.WithToken(tok))
 //
-// go-github v87+ is variadic over its own options, so the closure is needed
-// either way; NewE just gives the constructor's error somewhere to go. Use
-// New for constructors that cannot fail, such as githubv4.NewClient.
+// Use New for constructors that cannot fail, such as githubv4.NewClient.
 //
 // Factory errors are wrapped as "ghkit: factory: %w". A nil factory returns
 // the zero value of T and ErrNilFactory.
@@ -185,6 +194,44 @@ func NewE[T any](factory func(*http.Client) (T, error), opts ...Option) (T, erro
 		return zero, fmt.Errorf("ghkit: factory: %w", err)
 	}
 	return v, nil
+}
+
+// Adapt converts an SDK constructor that is variadic over its own options
+// into the func(*http.Client) (T, error) shape NewE takes. go-github v87
+// changed NewClient to `NewClient(opts ...ClientOptionsFunc) (*Client, error)`,
+// which no longer binds to New or NewE on its own:
+//
+//	import "github.com/google/go-github/v90/github"
+//
+//	gh, err := ghkit.NewE(
+//	    ghkit.Adapt(github.NewClient, github.WithHTTPClient),
+//	    ghkit.WithToken(os.Getenv("GITHUB_TOKEN")),
+//	)
+//
+// Adapt pairs with NewE, not New: it returns an error-returning factory, so
+// ghkit.New(ghkit.Adapt(...)) does not compile.
+//
+// It fits constructors shaped func(...O) (T, error) only. SDKs taking a
+// leading positional argument or a context, such as ghinstallation or
+// google.golang.org/api, do not fit; build those on HTTPClient directly.
+//
+// httpOption must be the SDK option constructor that accepts the
+// *http.Client, which for go-github is the only such option. Options that
+// would replace the transport stack (github.WithTransport) or read it back
+// (github.WithEnvProxy) take other types and will not compile here.
+//
+// Adapt passes no further options. When the constructor needs its own, pass
+// a closure to NewE instead, as shown on NewE.
+//
+// A nil factory or httpOption yields a nil result, so New and NewE report
+// ErrNilFactory.
+func Adapt[T, O any](factory func(...O) (T, error), httpOption func(*http.Client) O) func(*http.Client) (T, error) {
+	if factory == nil || httpOption == nil {
+		return nil
+	}
+	return func(hc *http.Client) (T, error) {
+		return factory(httpOption(hc))
+	}
 }
 
 func validateConfig(c *config) error {
