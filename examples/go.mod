@@ -1,8 +1,8 @@
 module github.com/pcanilho/go-github-kit/examples
 
-go 1.26
+go 1.27
 
-toolchain go1.26.6
+toolchain go1.27.0
 
 require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0

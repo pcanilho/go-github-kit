@@ -37,9 +37,9 @@ func (s *syncBuf) String() string {
 // observe the primary-limit callback firing.
 func rlPrimaryServer(t *testing.T, limitResponses int) *httptest.Server {
 	t.Helper()
-	var seen int32
+	var seen atomic.Int32
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if int(atomic.AddInt32(&seen, 1)) <= limitResponses {
+		if int(seen.Add(1)) <= limitResponses {
 			w.Header().Set("X-RateLimit-Remaining", "0")
 			w.Header().Set("X-RateLimit-Reset", "1")
 			w.Header().Set("X-RateLimit-Resource", "core")

@@ -123,10 +123,10 @@ func BenchmarkPages_AsTyped(b *testing.B) {
 // changes to caching behaviour show up here, not just in the latency
 // numbers above.
 func BenchmarkPages_HandlerHits(b *testing.B) {
-	var hits int32
+	var hits atomic.Int32
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
+		hits.Add(1)
 		page := 1
 		if p := r.URL.Query().Get("page"); p != "" {
 			page, _ = strconv.Atoi(p)
@@ -145,5 +145,5 @@ func BenchmarkPages_HandlerHits(b *testing.B) {
 	for range b.N {
 		drainPages(b, hc, srv.URL+"/items")
 	}
-	b.ReportMetric(float64(atomic.LoadInt32(&hits))/float64(b.N), "hits/walk")
+	b.ReportMetric(float64(hits.Load())/float64(b.N), "hits/walk")
 }

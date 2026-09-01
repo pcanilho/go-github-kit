@@ -5,6 +5,55 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-09-01
+
+Maintenance release. Moves the module to Go 1.27, applies `go fix ./...`,
+and refreshes the pinned GitHub Actions. No exported signature, type shape,
+sentinel or message string changed, and no library behaviour changed.
+
+This raises the consumer floor: the `go` directive moves from `1.26` to
+`1.27`, so a consumer building on Go 1.26 must upgrade. That is the only
+consumer-visible effect of this release. A `toolchain` directive in a
+dependency is still ignored, so the `go1.27.0` pin imposes nothing
+downstream.
+
+### Changed
+
+- `go.mod` and `examples/go.mod`: `go 1.26` to `go 1.27`, and
+  `toolchain go1.26.6` to `toolchain go1.27.0`. The directive is a minor
+  floor, not a patch-level one, so `GOTOOLCHAIN=local` builds keep working
+  on any 1.27 patch.
+- `retry`: the four `errors.As` calls in `IsTransientNetErr` and
+  `isPermanentNetErr` that only tested for a match, and never read the
+  bound variable, are now `errors.AsType`. This is the rewrite `go fix`
+  applies; `errors.AsType` has been available since Go 1.26, so the floor
+  rise above is not caused by it. The predicates classify exactly the same
+  errors as before. The two remaining `errors.As` calls are unchanged,
+  because both use the value they bind.
+- `etag/algo_test.go` reformatted. Go 1.27's `gofmt` changed how it groups
+  alignment runs in map literals, and this file is the only one in the
+  tree it repositions. Test data and assertions are untouched.
+- Test-only: `atomic.AddInt32`/`atomic.LoadInt32` over an `int32` replaced
+  with `atomic.Int32` methods in the `etag`, `pages` and `ratelimit` tests,
+  again from `go fix`.
+
+### CI
+
+- `golangci-lint` pinned version bumped from v2.11.4 to v2.13.1. This is
+  required by the toolchain bump rather than routine: v2.11.4 predates
+  Go 1.27 and carries a Go 1.26 formatter, so it would reject the
+  `etag/algo_test.go` reformat above and fail the lint job.
+- `gitleaks/gitleaks-action` bumped from v2.3.9 to v3.0.0. v3 is a runtime
+  migration from Node 20 to Node 24 with no change to inputs, outputs or
+  behaviour. GitHub removes Node 20 from hosted runners on 2026-09-16,
+  after which v2 stops running at all.
+- `actions/checkout` (v7.0.1), `actions/setup-go` (v7.0.0),
+  `actions/upload-artifact` (v7.0.1), `codecov/codecov-action` (v7.0.0) and
+  `golangci/golangci-lint-action` (v9.3.0) were each checked against their
+  latest release and are already pinned to it; no SHA changed. The
+  `golangci-lint-action` pin comment now names the exact version, v9.3.0,
+  matching every other pin in the tree.
+
 ## [1.8.0] - 2026-08-20
 
 Ergonomics release for go-github v87 and later. Adds `ghkit.Adapt`, which
@@ -858,6 +907,7 @@ and rotating PATs alike.
 - `golang.org/x/oauth2` v0.36.0
 - `golang.org/x/time` v0.15.0
 
+[1.9.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.9.0
 [1.8.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.8.0
 [1.7.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.7.0
 [1.6.2]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.6.2
