@@ -132,12 +132,10 @@ func IsTransientNetErr(err error) bool {
 	if isPermanentNetErr(err) {
 		return false
 	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if _, ok := errors.AsType[*net.OpError](err); ok {
 		return true
 	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
+	if _, ok := errors.AsType[*net.DNSError](err); ok {
 		// IsNotFound was filtered out above; remaining DNS errors (server
 		// failure, timeout) are transient.
 		return true
@@ -162,12 +160,10 @@ func isPermanentNetErr(err error) bool {
 	if errors.Is(err, syscall.ECONNREFUSED) {
 		return true
 	}
-	var unknownAuth x509.UnknownAuthorityError
-	if errors.As(err, &unknownAuth) {
+	if _, ok := errors.AsType[x509.UnknownAuthorityError](err); ok {
 		return true
 	}
-	var hostnameErr *x509.HostnameError
-	if errors.As(err, &hostnameErr) {
+	if _, ok := errors.AsType[*x509.HostnameError](err); ok {
 		return true
 	}
 	var certInvalid x509.CertificateInvalidError

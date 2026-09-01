@@ -156,12 +156,12 @@ func TestETag_NormalisePath(t *testing.T) {
 		"/repos/google/go-github":                        "/repos/{o}/{r}",
 		"/repos/google/go-github/commits/abc1234567":     "/repos/{o}/{r}/commits/{sha}",
 		"/repos/google/go-github/compare/main...feature": "/repos/{o}/{r}/compare/{base...head}",
-		testPathOctocat:            "/users/{u}",
-		"/orgs/github":             "/orgs/{o}",
-		"/app/installations/12345": "/app/installations/{id}",
-		"/meta":                    "/meta",
-		"/gists/1234":              "/gists/_", // unknown-route fallback
-		"/unmapped":                "unknown",
+		testPathOctocat:                                  "/users/{u}",
+		"/orgs/github":                                   "/orgs/{o}",
+		"/app/installations/12345":                       "/app/installations/{id}",
+		"/meta":                                          "/meta",
+		"/gists/1234":                                    "/gists/_", // unknown-route fallback
+		"/unmapped":                                      "unknown",
 	}
 	for in, want := range cases {
 		if got := normalisePath(in); got != want {

@@ -218,11 +218,11 @@ func TestPages_304PreservesLink(t *testing.T) {
 	// second range over the same URL hits the 304 path on every page;
 	// the etag layer's merged-headers code must preserve the Link
 	// header so the iterator still walks page 2.
-	var hits int32
+	var hits atomic.Int32
 	var srv *httptest.Server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/items", func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
+		hits.Add(1)
 		page := 1
 		if p := r.URL.Query().Get("page"); p != "" {
 			page, _ = strconv.Atoi(p)
@@ -261,7 +261,7 @@ func TestPages_304PreservesLink(t *testing.T) {
 	if got := walk(); got != 2 {
 		t.Fatalf("first walk pageCount = %d, want 2", got)
 	}
-	firstHits := atomic.LoadInt32(&hits)
+	firstHits := hits.Load()
 
 	// Second walk: each page should round-trip but resolve to 304. The
 	// Link header survives the 304 path, so the iterator still walks 2
@@ -269,7 +269,7 @@ func TestPages_304PreservesLink(t *testing.T) {
 	if got := walk(); got != 2 {
 		t.Fatalf("second walk pageCount = %d, want 2", got)
 	}
-	if got := atomic.LoadInt32(&hits); got != firstHits*2 {
+	if got := hits.Load(); got != firstHits*2 {
 		t.Errorf("hits after second walk = %d, want %d (one round-trip per page)", got, firstHits*2)
 	}
 }
@@ -346,11 +346,11 @@ func TestAs_DecodeError(t *testing.T) {
 // closeCounter wraps a body so the test can assert close behaviour.
 type closeCounter struct {
 	io.Reader
-	closes int32
+	closes atomic.Int32
 }
 
 func (c *closeCounter) Close() error {
-	atomic.AddInt32(&c.closes, 1)
+	c.closes.Add(1)
 	return nil
 }
 
@@ -381,7 +381,7 @@ func TestAs_BodyClosedAfterDecode(t *testing.T) {
 	if elems != 2 {
 		t.Errorf("elems = %d, want 2", elems)
 	}
-	if got := atomic.LoadInt32(&cc.closes); got != 1 {
+	if got := cc.closes.Load(); got != 1 {
 		t.Errorf("body closes = %d, want 1", got)
 	}
 }
@@ -407,7 +407,7 @@ func TestAs_BodyClosedOnDecodePanic(t *testing.T) {
 		// Recover the panic; we only care that the body got closed
 		// before unwinding past the iterator.
 		_ = recover()
-		if got := atomic.LoadInt32(&cc.closes); got != 1 {
+		if got := cc.closes.Load(); got != 1 {
 			t.Errorf("body closes after panic = %d, want 1", got)
 		}
 	}()
@@ -449,7 +449,7 @@ func TestAs_BodyClosedOnCallerBreak(t *testing.T) {
 	}
 	// The body for the page we touched must be closed even though we
 	// broke before consuming all elements.
-	if got := atomic.LoadInt32(&cc.closes); got != 1 {
+	if got := cc.closes.Load(); got != 1 {
 		t.Errorf("body closes = %d, want 1", got)
 	}
 }

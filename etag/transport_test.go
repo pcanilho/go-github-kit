@@ -367,11 +367,11 @@ func TestETag_LinkHeaderPreservedOn304Replay(t *testing.T) {
 
 func TestETag_WriteInvalidation_404(t *testing.T) {
 	body := []byte("x")
-	var count int32
+	var count atomic.Int32
 	var lastIfNoneMatch atomic.Value // string
 	lastIfNoneMatch.Store("")
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&count, 1)
+		n := count.Add(1)
 		lastIfNoneMatch.Store(r.Header.Get("If-None-Match"))
 		switch n {
 		case 1:
@@ -418,7 +418,7 @@ func TestETag_WriteInvalidation_404(t *testing.T) {
 	if err := r3.Body.Close(); err != nil {
 		t.Fatalf("post-invalidation body close: %v", err)
 	}
-	if got := atomic.LoadInt32(&count); got != 3 {
+	if got := count.Load(); got != 3 {
 		t.Fatalf("expected 3 upstream requests after invalidation; got %d", got)
 	}
 	if got := lastIfNoneMatch.Load().(string); got != "" {
