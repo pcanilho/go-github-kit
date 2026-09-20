@@ -9,7 +9,7 @@ require (
 	github.com/google/go-github/v90 v90.0.0
 	github.com/pcanilho/go-github-kit v1.0.0
 	github.com/shurcooL/githubv4 v0.0.0-20260209031235-2402fdf4a9ed
-	golang.org/x/oauth2 v0.36.0
+	golang.org/x/oauth2 v0.37.0
 )
 
 require (
