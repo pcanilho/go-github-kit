@@ -5,6 +5,41 @@ All notable changes to **go-github-kit** are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1] - 2026-09-20
+
+Maintenance release. Bumps `golang.org/x/oauth2` and `golang.org/x/time`
+in the root module and brings `examples/` in step. No library source or
+public API changes since 1.9.0.
+
+Neither bump changes behaviour for consumers. `oauth2` v0.37.0 carries one
+code change, an endpoint rename in its `google` subpackage, which the kit
+does not import; the kit uses only the core `oauth2` package for
+`WithToken` and `WithTokenSource`. `x/time` v0.16.0 has no code change.
+Both modules now declare `go 1.26.0`, below the kit's own `go 1.27` floor
+set in 1.9.0, so the consumer floor is unchanged.
+
+### Dependencies
+
+- `golang.org/x/oauth2` v0.36.0 to v0.37.0.
+- `golang.org/x/time` v0.15.0 to v0.16.0.
+
+### Examples
+
+- `examples/go.mod` follows the root module: `golang.org/x/oauth2` v0.37.0
+  (direct) and `golang.org/x/time` v0.16.0 (indirect). The examples module
+  replaces the kit with `../`, so a root bump that is not mirrored here
+  fails the examples tidy check in CI; that is what blocked the Dependabot
+  PR for this bump, and why the two modules move together in this release.
+
+### CI
+
+- `.github/dependabot.yml`: the two `gomod` entries for `/` and
+  `/examples` are merged into one entry listing both `directories`, so
+  a version bump lands in both go.mod files in a single grouped PR.
+  Group names are unchanged. Dependabot does not bump indirect
+  requirements on its own, so a root-only dependency that examples sees
+  transitively may still need a manual `go mod tidy` in `examples/`.
+
 ## [1.9.0] - 2026-09-01
 
 Maintenance release. Moves the module to Go 1.27, applies `go fix ./...`,
@@ -907,6 +942,7 @@ and rotating PATs alike.
 - `golang.org/x/oauth2` v0.36.0
 - `golang.org/x/time` v0.15.0
 
+[1.9.1]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.9.1
 [1.9.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.9.0
 [1.8.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.8.0
 [1.7.0]: https://github.com/pcanilho/go-github-kit/releases/tag/v1.7.0

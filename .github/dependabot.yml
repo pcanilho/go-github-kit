@@ -1,7 +1,12 @@
 version: 2
 updates:
+  # One entry for both Go modules. examples/ replaces the kit with ../, so
+  # a bump in the root module must land in examples/go.mod in the same PR
+  # or the examples tidy check fails.
   - package-ecosystem: gomod
-    directory: /
+    directories:
+      - /
+      - /examples
     schedule:
       interval: weekly
       day: monday
@@ -15,25 +20,6 @@ updates:
           - minor
           - patch
       go-deps-security:
-        applies-to: security-updates
-        patterns:
-          - "*"
-
-  - package-ecosystem: gomod
-    directory: /examples
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    groups:
-      go-deps-examples:
-        applies-to: version-updates
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-      go-deps-examples-security:
         applies-to: security-updates
         patterns:
           - "*"
