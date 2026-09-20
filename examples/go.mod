@@ -19,7 +19,7 @@ require (
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/shurcooL/graphql v0.0.0-20240915155400-7ee5256398cf // indirect
-	golang.org/x/time v0.15.0 // indirect
+	golang.org/x/time v0.16.0 // indirect
 )
 
 replace github.com/pcanilho/go-github-kit => ../
