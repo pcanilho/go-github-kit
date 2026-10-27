@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/google/go-github/v90/github"
+	"github.com/google/go-github/v91/github"
 	ghkit "github.com/pcanilho/go-github-kit"
 	"github.com/pcanilho/go-github-kit/cond"
 )
