@@ -201,7 +201,7 @@ func NewE[T any](factory func(*http.Client) (T, error), opts ...Option) (T, erro
 // changed NewClient to `NewClient(opts ...ClientOptionsFunc) (*Client, error)`,
 // which no longer binds to New or NewE on its own:
 //
-//	import "github.com/google/go-github/v90/github"
+//	import "github.com/google/go-github/v91/github"
 //
 //	gh, err := ghkit.NewE(
 //	    ghkit.Adapt(github.NewClient, github.WithHTTPClient),
